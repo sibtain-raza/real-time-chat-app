@@ -5,3 +5,5 @@ all.log
 web/node_modules/
 web/dist/
 *.log
+chatapp.db
+chatapp.db-*

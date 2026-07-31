@@ -38,18 +38,49 @@ async function deriveAesKey(privateKey: CryptoKey, peerPublicKeyB64: string): Pr
   return crypto.subtle.importKey('raw', digest, 'AES-GCM', false, ['encrypt', 'decrypt'])
 }
 
-/** Create a fresh ECDH P-256 identity for this session. */
-export async function createIdentity(): Promise<Identity> {
+function storageKey(username: string) {
+  return `chatapp:ecdh:${username.toLowerCase()}`
+}
+
+/** Load an existing identity for this username, or create and persist a new one. */
+export async function loadOrCreateIdentity(username: string): Promise<Identity> {
+  const raw = localStorage.getItem(storageKey(username))
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as { publicKeyB64: string; privateKeyB64: string }
+      const privBytes = fromBase64(parsed.privateKeyB64)
+      const privateKey = await crypto.subtle.importKey(
+        'pkcs8',
+        privBytes.buffer as ArrayBuffer,
+        { name: 'ECDH', namedCurve: 'P-256' },
+        true,
+        ['deriveBits'],
+      )
+      return { publicKeyB64: parsed.publicKeyB64, privateKey }
+    } catch {
+      localStorage.removeItem(storageKey(username))
+    }
+  }
+
   const pair = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
     true,
     ['deriveBits'],
   )
-  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
-  return {
-    publicKeyB64: toBase64(raw),
+  const pubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
+  const privRaw = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))
+  const identity: Identity = {
+    publicKeyB64: toBase64(pubRaw),
     privateKey: pair.privateKey,
   }
+  localStorage.setItem(
+    storageKey(username),
+    JSON.stringify({
+      publicKeyB64: identity.publicKeyB64,
+      privateKeyB64: toBase64(privRaw),
+    }),
+  )
+  return identity
 }
 
 export async function encryptFor(
@@ -79,11 +110,7 @@ export async function decryptFrom(
   const raw = fromBase64(ciphertextB64)
   const nonce = raw.slice(0, 12)
   const data = raw.slice(12)
-  const plain = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce },
-    key,
-    data,
-  )
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, data)
   return new Uint8Array(plain)
 }
 
@@ -104,7 +131,6 @@ export async function decryptTextFrom(
   return new TextDecoder().decode(bytes)
 }
 
-/** Short fingerprint for display (not for security decisions). */
 export function fingerprint(publicKeyB64: string): string {
   const raw = fromBase64(publicKeyB64)
   let hex = ''

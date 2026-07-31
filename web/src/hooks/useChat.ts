@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  createIdentity,
   decryptFrom,
   decryptTextFrom,
   encryptFor,
   encryptTextFor,
   fingerprint,
+  loadOrCreateIdentity,
   type Identity,
 } from '../lib/crypto'
-import { type Envelope, type Packet, type Peer, wsURL } from '../lib/protocol'
+import { apiURL, type Packet, type UserInfo, wsURL } from '../lib/protocol'
 import { VoiceSession } from '../lib/voice'
 
 export type ChatMessage = {
@@ -17,30 +17,68 @@ export type ChatMessage = {
   text: string
   at: string
   self?: boolean
+  system?: boolean
+}
+
+export type AuthSession = {
+  token: string
+  username: string
 }
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error'
 
+const SESSION_KEY = 'chatapp:session'
+
+export function loadSession(): AuthSession | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as AuthSession
+  } catch {
+    return null
+  }
+}
+
+function saveSession(s: AuthSession | null) {
+  if (!s) localStorage.removeItem(SESSION_KEY)
+  else localStorage.setItem(SESSION_KEY, JSON.stringify(s))
+}
+
 export function useChat() {
+  const [session, setSession] = useState<AuthSession | null>(() => loadSession())
+  const [authError, setAuthError] = useState<string | null>(null)
   const [status, setStatus] = useState<ConnectionState>('idle')
   const [error, setError] = useState<string | null>(null)
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [peers, setPeers] = useState<Peer[]>([])
+  const [users, setUsers] = useState<UserInfo[]>([])
+  const [activePeer, setActivePeer] = useState<string | null>(null)
+  const [threads, setThreads] = useState<Record<string, ChatMessage[]>>({})
   const [micOn, setMicOn] = useState(false)
   const [speakerOn, setSpeakerOn] = useState(false)
   const [keyPrint, setKeyPrint] = useState<string | null>(null)
+  const [host, setHost] = useState('')
 
   const wsRef = useRef<WebSocket | null>(null)
   const identityRef = useRef<Identity | null>(null)
-  const peersRef = useRef<Peer[]>([])
-  const nameRef = useRef('')
+  const usersRef = useRef<UserInfo[]>([])
+  const activePeerRef = useRef<string | null>(null)
   const voiceRef = useRef(new VoiceSession())
+  const hostRef = useRef('')
 
-  const append = useCallback((msg: Omit<ChatMessage, 'id'>) => {
-    setMessages((prev) => [...prev, { ...msg, id: `${Date.now()}-${Math.random()}` }])
+  useEffect(() => {
+    activePeerRef.current = activePeer
+  }, [activePeer])
+
+  const appendTo = useCallback((peer: string, msg: Omit<ChatMessage, 'id'>) => {
+    setThreads((prev) => {
+      const list = prev[peer] ?? []
+      return {
+        ...prev,
+        [peer]: [...list, { ...msg, id: `${Date.now()}-${Math.random()}` }],
+      }
+    })
   }, [])
 
-  const disconnect = useCallback(() => {
+  const disconnectSocket = useCallback(() => {
     voiceRef.current.dispose()
     voiceRef.current = new VoiceSession()
     setMicOn(false)
@@ -48,44 +86,71 @@ export function useChat() {
     wsRef.current?.close()
     wsRef.current = null
     identityRef.current = null
-    peersRef.current = []
-    setPeers([])
     setKeyPrint(null)
     setStatus('idle')
   }, [])
 
+  const logout = useCallback(() => {
+    disconnectSocket()
+    saveSession(null)
+    setSession(null)
+    setUsers([])
+    setActivePeer(null)
+    setThreads({})
+    setAuthError(null)
+  }, [disconnectSocket])
+
+  const authRequest = useCallback(
+    async (mode: 'signup' | 'login', username: string, password: string, serverHost: string) => {
+      setAuthError(null)
+      setHost(serverHost)
+      hostRef.current = serverHost
+      const res = await fetch(apiURL(`/api/${mode}`, serverHost), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      })
+      const data = (await res.json()) as { token?: string; username?: string; error?: string }
+      if (!res.ok || !data.token || !data.username) {
+        throw new Error(data.error || `${mode} failed`)
+      }
+      const next = { token: data.token, username: data.username }
+      saveSession(next)
+      setSession(next)
+      return next
+    },
+    [],
+  )
+
+  const signup = useCallback(
+    (username: string, password: string, serverHost = '') =>
+      authRequest('signup', username, password, serverHost),
+    [authRequest],
+  )
+
+  const login = useCallback(
+    (username: string, password: string, serverHost = '') =>
+      authRequest('login', username, password, serverHost),
+    [authRequest],
+  )
+
   const connect = useCallback(
-    async (host: string, name: string) => {
+    async (sess: AuthSession, serverHost = hostRef.current) => {
       setError(null)
       setStatus('connecting')
-      setMessages([])
-      nameRef.current = name
+      hostRef.current = serverHost
 
-      const identity = await createIdentity()
+      const identity = await loadOrCreateIdentity(sess.username)
       identityRef.current = identity
       setKeyPrint(fingerprint(identity.publicKeyB64))
 
-      const url = host.trim()
-        ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${host.replace(/^https?:\/\//, '').replace(/\/$/, '')}/ws`
-        : wsURL()
-
       await new Promise<void>((resolve, reject) => {
-        const ws = new WebSocket(url)
+        const ws = new WebSocket(wsURL(serverHost))
         wsRef.current = ws
 
         ws.onopen = () => {
-          ws.send(
-            JSON.stringify({
-              name,
-              publicKey: identity.publicKeyB64,
-            }),
-          )
+          ws.send(JSON.stringify({ token: sess.token, publicKey: identity.publicKeyB64 }))
           setStatus('connected')
-          append({
-            from: 'system',
-            text: `Joined as ${name} · key ${fingerprint(identity.publicKeyB64)}`,
-            at: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-          })
           resolve()
         }
 
@@ -109,85 +174,83 @@ export function useChat() {
             const me = identityRef.current
             if (!me) return
 
-            if (pkt.type === 'peers' && pkt.peers) {
-              peersRef.current = pkt.peers
-              setPeers(pkt.peers)
+            if (pkt.type === 'users' && pkt.users) {
+              const others = pkt.users.filter((u) => u.username !== sess.username)
+              usersRef.current = others
+              setUsers(others)
               return
             }
 
-            if (pkt.type === 'message' && pkt.message && pkt.publicKey) {
+            if (pkt.type === 'error' && pkt.error) {
+              setError(pkt.error)
+              return
+            }
+
+            if (pkt.type === 'message' && pkt.message && pkt.publicKey && pkt.from) {
               const text = await decryptTextFrom(me.privateKey, pkt.publicKey, pkt.message)
-              append({
-                from: pkt.name || 'unknown',
+              appendTo(pkt.from, {
+                from: pkt.from,
                 text,
                 at: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
               })
+              if (!activePeerRef.current) setActivePeer(pkt.from)
               return
             }
 
-            if (pkt.type === 'voice' && pkt.message && pkt.publicKey) {
+            if (pkt.type === 'voice' && pkt.message && pkt.publicKey && pkt.from) {
               const pcm = await decryptFrom(me.privateKey, pkt.publicKey, pkt.message)
               await voiceRef.current.playPCM(pcm)
             }
           } catch {
-            // ignore decrypt/parse errors
+            // ignore
           }
         }
       })
     },
-    [append],
+    [appendTo],
   )
 
-  const buildEnvelopes = useCallback(async (plain: Uint8Array): Promise<Envelope[]> => {
-    const me = identityRef.current
-    if (!me) return []
-    const others = peersRef.current.filter((p) => p.publicKey !== me.publicKeyB64)
-    const envelopes: Envelope[] = []
-    for (const peer of others) {
-      const message = await encryptFor(me.privateKey, peer.publicKey, plain)
-      envelopes.push({ to: peer.publicKey, message })
-    }
-    return envelopes
-  }, [])
+  // Auto-connect after login/signup when session exists
+  useEffect(() => {
+    if (!session) return
+    if (status === 'connected' || status === 'connecting') return
+    void connect(session, host).catch(() => {
+      setAuthError('Session expired or server unreachable. Please log in again.')
+      logout()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session])
 
   const sendText = useCallback(
     async (text: string) => {
       const ws = wsRef.current
       const me = identityRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN || !me) return
+      const peerName = activePeerRef.current
+      if (!ws || ws.readyState !== WebSocket.OPEN || !me || !peerName) return
 
-      const others = peersRef.current.filter((p) => p.publicKey !== me.publicKeyB64)
-      if (others.length === 0) {
-        append({
-          from: 'system',
-          text: 'No other peers online yet — message kept local.',
-          at: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
-        })
+      const peer = usersRef.current.find((u) => u.username === peerName)
+      if (!peer?.online || !peer.publicKey) {
+        setError(`${peerName} is offline`)
+        return
       }
 
-      const envelopes: Envelope[] = []
-      for (const peer of others) {
-        const message = await encryptTextFor(me.privateKey, peer.publicKey, text)
-        envelopes.push({ to: peer.publicKey, message })
-      }
-
-      const pkt: Packet = { type: 'message', envelopes }
+      const message = await encryptTextFor(me.privateKey, peer.publicKey, text)
+      const pkt: Packet = { type: 'message', to: peerName, message }
       ws.send(JSON.stringify(pkt))
-      append({
+      appendTo(peerName, {
         from: 'You',
         text,
         at: new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
         self: true,
       })
     },
-    [append],
+    [appendTo],
   )
 
   const sendSetting = useCallback((voice: 'on' | 'off') => {
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    const pkt: Packet = { type: 'setting', voice }
-    ws.send(JSON.stringify(pkt))
+    ws.send(JSON.stringify({ type: 'setting', voice } satisfies Packet))
   }, [])
 
   const toggleSpeaker = useCallback(async () => {
@@ -210,31 +273,40 @@ export function useChat() {
     }
     await voiceRef.current.startMic(async (pcm) => {
       const ws = wsRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
-      const envelopes = await buildEnvelopes(pcm)
-      if (envelopes.length === 0) return
-      const pkt: Packet = { type: 'voice', envelopes }
-      ws.send(JSON.stringify(pkt))
+      const me = identityRef.current
+      const peerName = activePeerRef.current
+      if (!ws || ws.readyState !== WebSocket.OPEN || !me || !peerName) return
+      const peer = usersRef.current.find((u) => u.username === peerName)
+      if (!peer?.online || !peer.publicKey) return
+      const message = await encryptFor(me.privateKey, peer.publicKey, pcm)
+      ws.send(JSON.stringify({ type: 'voice', to: peerName, message } satisfies Packet))
     })
     setMicOn(true)
-  }, [buildEnvelopes, micOn])
+  }, [micOn])
 
-  useEffect(() => () => disconnect(), [disconnect])
+  useEffect(() => () => disconnectSocket(), [disconnectSocket])
 
-  const otherPeers = peers.filter(
-    (p) => p.publicKey !== identityRef.current?.publicKeyB64,
-  )
+  const messages = activePeer ? threads[activePeer] ?? [] : []
 
   return {
+    session,
+    authError,
+    setAuthError,
     status,
     error,
+    setError,
+    users,
+    activePeer,
+    setActivePeer,
     messages,
-    peers: otherPeers,
     keyPrint,
     micOn,
     speakerOn,
-    connect,
-    disconnect,
+    host,
+    setHost,
+    signup,
+    login,
+    logout,
     sendText,
     toggleMic,
     toggleSpeaker,

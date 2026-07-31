@@ -1,41 +1,44 @@
 package server
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"securechat/internal/auth"
 	"securechat/internal/protocol"
 
 	"github.com/gorilla/websocket"
 )
 
-// Client holds per-connection state.
 type Client struct {
 	transport protocol.Transport
-	name      string
+	username  string
 	publicKey string
 }
 
-// Server is a multi-client E2E chat relay with a React web UI.
-// It never decrypts message contents — only routes opaque envelopes by public key.
 type Server struct {
 	addr      string
 	webDir    string
+	store     *auth.Store
 	mu        sync.RWMutex
-	clients   map[*Client]struct{}
-	streaming map[*Client]struct{}
+	clients   map[string]*Client // username -> client (one active session)
+	streaming map[string]bool
 	logger    *log.Logger
 	debug     bool
 	upgrader  websocket.Upgrader
 }
 
-func New(addr, webDir string, debug bool) *Server {
+func New(addr, webDir string, store *auth.Store, debug bool) *Server {
 	f, err := os.OpenFile("all.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	var logger *log.Logger
 	if err != nil {
@@ -46,8 +49,9 @@ func New(addr, webDir string, debug bool) *Server {
 	return &Server{
 		addr:      addr,
 		webDir:    webDir,
-		clients:   make(map[*Client]struct{}),
-		streaming: make(map[*Client]struct{}),
+		store:     store,
+		clients:   make(map[string]*Client),
+		streaming: make(map[string]bool),
 		logger:    logger,
 		debug:     debug,
 		upgrader: websocket.Upgrader{
@@ -64,20 +68,21 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-func (s *Server) ClientCount() int {
+func (s *Server) OnlineCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.clients)
 }
 
-// Handler returns the HTTP mux (static UI + /ws + health).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("/api/signup", s.handleSignup)
+	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/users", s.handleUsers)
 
 	if s.webDir != "" {
 		webDir := s.webDir
@@ -111,6 +116,131 @@ func (s *Server) ListenAndServe() error {
 	return http.Serve(ln, s.Handler())
 }
 
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readJSON(r *http.Request, v any) error {
+	defer r.Body.Close()
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	return dec.Decode(v)
+}
+
+func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := s.store.SignUp(body.Username, body.Password); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrUserExists) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	token, err := s.store.Login(body.Username, body.Password)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "account created but login failed"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"token":    token,
+		"username": strings.TrimSpace(body.Username),
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	token, err := s.store.Login(body.Username, body.Password)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, auth.ErrBadUsername) || errors.Is(err, auth.ErrBadPassword) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"token":    token,
+		"username": strings.TrimSpace(body.Username),
+	})
+}
+
+func (s *Server) bearerUser(r *http.Request) (string, error) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return "", auth.ErrBadToken
+	}
+	return s.store.UsernameForToken(strings.TrimPrefix(h, "Bearer "))
+}
+
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	if _, err := s.bearerUser(r); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": s.directory()})
+}
+
+func (s *Server) directory() []protocol.UserInfo {
+	users, err := s.store.ListUsers()
+	if err != nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]protocol.UserInfo, 0, len(users))
+	for _, u := range users {
+		pub := u.PublicKey
+		online := false
+		if c, ok := s.clients[u.Username]; ok {
+			online = true
+			pub = c.publicKey
+		}
+		out = append(out, protocol.UserInfo{
+			Username:  u.Username,
+			PublicKey: pub,
+			Online:    online,
+		})
+	}
+	return out
+}
+
+func (s *Server) broadcastUsers() {
+	pkt := protocol.Packet{Type: protocol.TypeUsers, Users: s.directory()}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, c := range s.clients {
+		_ = c.transport.WriteJSON(pkt)
+	}
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -127,24 +257,37 @@ func (s *Server) serveClient(t protocol.Transport) {
 		_ = t.Close()
 		return
 	}
-	if hs.Name == "" || hs.PublicKey == "" {
+	username, err := s.store.UsernameForToken(hs.Token)
+	if err != nil || hs.PublicKey == "" {
+		_ = t.WriteJSON(protocol.Packet{Type: protocol.TypeError, Error: "unauthorized"})
 		_ = t.Close()
 		return
 	}
+	_ = s.store.SetPublicKey(username, hs.PublicKey)
 
-	client := &Client{transport: t, name: hs.Name, publicKey: hs.PublicKey}
+	client := &Client{transport: t, username: username, publicKey: hs.PublicKey}
+
 	s.mu.Lock()
-	s.clients[client] = struct{}{}
+	if old, ok := s.clients[username]; ok {
+		_ = old.transport.Close()
+		delete(s.streaming, username)
+	}
+	s.clients[username] = client
 	s.mu.Unlock()
 
-	s.logf("Connected %s as %q", t.RemoteAddr(), hs.Name)
-	s.broadcastPeers()
+	s.logf("Connected %s as %q", t.RemoteAddr(), username)
+	s.broadcastUsers()
 
 	defer func() {
-		s.removeClient(client)
+		s.mu.Lock()
+		if cur, ok := s.clients[username]; ok && cur == client {
+			delete(s.clients, username)
+			delete(s.streaming, username)
+		}
+		s.mu.Unlock()
 		_ = t.Close()
-		s.logf("Disconnected %s (%s)", t.RemoteAddr(), hs.Name)
-		s.broadcastPeers()
+		s.logf("Disconnected %s (%s)", t.RemoteAddr(), username)
+		s.broadcastUsers()
 	}()
 
 	for {
@@ -156,92 +299,45 @@ func (s *Server) serveClient(t protocol.Transport) {
 	}
 }
 
-func (s *Server) removeClient(client *Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.clients, client)
-	delete(s.streaming, client)
-}
-
-func (s *Server) peerList() []protocol.Peer {
-	peers := make([]protocol.Peer, 0, len(s.clients))
-	for c := range s.clients {
-		peers = append(peers, protocol.Peer{Name: c.name, PublicKey: c.publicKey})
-	}
-	return peers
-}
-
-func (s *Server) broadcastPeers() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	pkt := protocol.Packet{Type: protocol.TypePeers, Peers: s.peerList()}
-	for c := range s.clients {
-		_ = c.transport.WriteJSON(pkt)
-	}
-}
-
 func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 	switch pkt.Type {
 	case protocol.TypeSetting:
 		s.mu.Lock()
 		if pkt.Voice == "on" {
-			s.streaming[sender] = struct{}{}
+			s.streaming[sender.username] = true
 		} else {
-			delete(s.streaming, sender)
+			delete(s.streaming, sender.username)
 		}
 		s.mu.Unlock()
 
-	case protocol.TypeMessage:
-		s.routeEnvelopes(sender, protocol.TypeMessage, pkt.Envelopes)
-
-	case protocol.TypeVoice:
-		s.routeVoiceEnvelopes(sender, pkt.Envelopes)
+	case protocol.TypeMessage, protocol.TypeVoice:
+		if pkt.To == "" || pkt.Message == "" {
+			return
+		}
+		s.mu.RLock()
+		target, ok := s.clients[pkt.To]
+		streaming := s.streaming[pkt.To]
+		s.mu.RUnlock()
+		if !ok {
+			_ = sender.transport.WriteJSON(protocol.Packet{
+				Type:  protocol.TypeError,
+				Error: pkt.To + " is offline",
+			})
+			return
+		}
+		if pkt.Type == protocol.TypeVoice && !streaming {
+			return
+		}
+		out := protocol.Packet{
+			Type:      pkt.Type,
+			From:      sender.username,
+			To:        pkt.To,
+			PublicKey: sender.publicKey,
+			Message:   pkt.Message,
+		}
+		_ = target.transport.WriteJSON(out)
 
 	default:
-		s.logf("unknown packet type %q from %s", pkt.Type, sender.name)
-	}
-}
-
-func (s *Server) routeEnvelopes(sender *Client, typ string, envelopes []protocol.Envelope) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	byKey := make(map[string]*Client, len(s.clients))
-	for c := range s.clients {
-		byKey[c.publicKey] = c
-	}
-	for _, env := range envelopes {
-		c := byKey[env.To]
-		if c == nil || c == sender {
-			continue
-		}
-		out := protocol.Packet{
-			Type:      typ,
-			Name:      sender.name,
-			PublicKey: sender.publicKey,
-			Message:   env.Message,
-		}
-		_ = c.transport.WriteJSON(out)
-	}
-}
-
-func (s *Server) routeVoiceEnvelopes(sender *Client, envelopes []protocol.Envelope) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	streaming := make(map[string]*Client, len(s.streaming))
-	for c := range s.streaming {
-		streaming[c.publicKey] = c
-	}
-	for _, env := range envelopes {
-		c := streaming[env.To]
-		if c == nil || c == sender {
-			continue
-		}
-		out := protocol.Packet{
-			Type:      protocol.TypeVoice,
-			Name:      sender.name,
-			PublicKey: sender.publicKey,
-			Message:   env.Message,
-		}
-		_ = c.transport.WriteJSON(out)
+		s.logf("unknown packet type %q from %s", pkt.Type, sender.username)
 	}
 }

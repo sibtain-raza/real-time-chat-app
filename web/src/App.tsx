@@ -24,174 +24,279 @@ function SpeakerIcon() {
 
 export default function App() {
   const {
+    session,
+    authError,
+    setAuthError,
     status,
     error,
+    setError,
+    users,
+    activePeer,
+    setActivePeer,
     messages,
-    peers,
     keyPrint,
     micOn,
     speakerOn,
-    connect,
-    disconnect,
+    host,
+    setHost,
+    signup,
+    login,
+    logout,
     sendText,
     toggleMic,
     toggleSpeaker,
   } = useChat()
 
-  const [host, setHost] = useState('')
-  const [name, setName] = useState('')
+  const [mode, setMode] = useState<'login' | 'signup'>('signup')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, activePeer])
 
-  async function onConnect(e: FormEvent) {
+  async function onAuth(e: FormEvent) {
     e.preventDefault()
-    if (!name.trim()) return
+    setAuthError(null)
+    setBusy(true)
     try {
-      await connect(host.trim(), name.trim())
-    } catch {
-      // error state handled in hook
+      if (mode === 'signup') await signup(username.trim(), password, host.trim())
+      else await login(username.trim(), password, host.trim())
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Authentication failed')
+    } finally {
+      setBusy(false)
     }
   }
 
   async function onSend(e: FormEvent) {
     e.preventDefault()
     const text = draft.trim()
-    if (!text) return
+    if (!text || !activePeer) return
     setDraft('')
+    setError(null)
     await sendText(text)
   }
 
-  const connected = status === 'connected'
+  const connected = Boolean(session) && status === 'connected'
+  const activeUser = users.find((u) => u.username === activePeer)
 
-  return (
-    <div className="app-shell">
-      <WavePlane />
-
-      {!connected ? (
+  if (!session) {
+    return (
+      <div className="app-shell">
+        <WavePlane />
         <main className="gate">
           <div className="gate-inner">
             <h1 className="brand">ChatApp</h1>
-            <p className="tagline">
-              A private keypair is created for you when you enter — no shared password to type.
-            </p>
+            <p className="tagline">Create an account, then talk one-to-one with private keys.</p>
 
-            <form className="gate-form" onSubmit={onConnect}>
+            <div className="mode-switch" role="tablist" aria-label="Auth mode">
+              <button
+                type="button"
+                className={mode === 'signup' ? 'mode on' : 'mode'}
+                onClick={() => setMode('signup')}
+              >
+                Sign up
+              </button>
+              <button
+                type="button"
+                className={mode === 'login' ? 'mode on' : 'mode'}
+                onClick={() => setMode('login')}
+              >
+                Log in
+              </button>
+            </div>
+
+            <form className="gate-form" onSubmit={onAuth}>
               <div className="field">
                 <label htmlFor="host">Server</label>
                 <input
                   id="host"
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
-                  placeholder="localhost:9090 (leave blank if same host)"
+                  placeholder="localhost:9090 (blank if same host)"
                   autoComplete="off"
                 />
               </div>
               <div className="field">
-                <label htmlFor="name">Name</label>
+                <label htmlFor="username">Username</label>
                 <input
-                  id="name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="How others see you"
+                  id="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="letters, numbers, _"
                   required
-                  autoComplete="nickname"
+                  minLength={3}
+                  autoComplete="username"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="password">Password</label>
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="at least 6 characters"
+                  required
+                  minLength={6}
+                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 />
               </div>
               <p className="key-note">
-                On join we generate an ECDH P-256 public/private key pair in your browser. Messages
-                are encrypted to each peer’s public key; the server only relays ciphertext.
+                After you {mode === 'signup' ? 'sign up' : 'log in'}, we create or restore your ECDH
+                key pair in this browser and open private 1:1 chats.
               </p>
               <div className="cta-row">
-                <button className="btn btn-primary" type="submit" disabled={status === 'connecting'}>
-                  {status === 'connecting' ? 'Creating keys…' : 'Enter room'}
+                <button className="btn btn-primary" type="submit" disabled={busy}>
+                  {busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Log in'}
                 </button>
               </div>
-              {error ? <p className="gate-error">{error}</p> : null}
+              {authError ? <p className="gate-error">{authError}</p> : null}
             </form>
           </div>
         </main>
-      ) : (
-        <main className="room">
-          <header className="room-top">
-            <div>
-              <h1 className="room-brand">ChatApp</h1>
-              {keyPrint ? <p className="key-print">Your key · {keyPrint}</p> : null}
-            </div>
-            <div className="room-meta">
-              <span>
-                <span className="status-dot" />
-                {name}
-                {peers.length > 0 ? ` · ${peers.length} peer${peers.length === 1 ? '' : 's'}` : ''}
-              </span>
-              <button className="btn btn-ghost" type="button" onClick={disconnect}>
-                Leave
-              </button>
-            </div>
-          </header>
+      </div>
+    )
+  }
 
-          {peers.length > 0 ? (
-            <p className="peer-line">
-              Talking with {peers.map((p) => p.name).join(', ')}
+  if (!connected) {
+    return (
+      <div className="app-shell">
+        <WavePlane />
+        <main className="gate">
+          <div className="gate-inner">
+            <h1 className="brand">ChatApp</h1>
+            <p className="tagline">
+              {status === 'connecting' ? 'Connecting secure session…' : 'Reconnecting…'}
             </p>
-          ) : (
-            <p className="peer-line">Waiting for someone else to join…</p>
-          )}
-
-          <section className="transcript" aria-live="polite">
-            {messages.map((m) => (
-              <article
-                key={m.id}
-                className={`msg${m.self ? ' self' : ''}${m.from === 'system' ? ' system' : ''}`}
-              >
-                {m.from !== 'system' ? (
-                  <div className="msg-head">
-                    <span className="msg-name">{m.from}</span>
-                    <time>{m.at}</time>
-                  </div>
-                ) : null}
-                <div className="msg-body">{m.text}</div>
-              </article>
-            ))}
-            <div ref={endRef} />
-          </section>
-
-          <form className="composer" onSubmit={onSend}>
-            <div className="media-toggles">
-              <button
-                type="button"
-                className={`toggle${micOn ? ' on' : ''}`}
-                aria-pressed={micOn}
-                aria-label={micOn ? 'Mute microphone' : 'Unmute microphone'}
-                onClick={() => void toggleMic()}
-              >
-                <MicIcon />
-              </button>
-              <button
-                type="button"
-                className={`toggle${speakerOn ? ' on' : ''}`}
-                aria-pressed={speakerOn}
-                aria-label={speakerOn ? 'Mute speaker' : 'Unmute speaker'}
-                onClick={() => void toggleSpeaker()}
-              >
-                <SpeakerIcon />
-              </button>
-            </div>
-            <input
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder="Write a message"
-              aria-label="Message"
-            />
-            <button className="btn btn-primary" type="submit">
-              Send
+            {error ? <p className="gate-error">{error}</p> : null}
+            <button className="btn btn-ghost" type="button" onClick={logout}>
+              Log out
             </button>
-          </form>
+          </div>
         </main>
-      )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="app-shell">
+      <WavePlane />
+      <main className="desk">
+        <aside className="sidebar">
+          <div className="sidebar-head">
+            <h1 className="room-brand">ChatApp</h1>
+            <p className="key-print">
+              {session.username}
+              {keyPrint ? ` · ${keyPrint}` : ''}
+            </p>
+          </div>
+          <p className="sidebar-label">People</p>
+          <ul className="user-list">
+            {users.length === 0 ? (
+              <li className="user-empty">No other accounts yet. Invite someone to sign up.</li>
+            ) : (
+              users.map((u) => (
+                <li key={u.username}>
+                  <button
+                    type="button"
+                    className={`user-row${activePeer === u.username ? ' active' : ''}`}
+                    onClick={() => {
+                      setActivePeer(u.username)
+                      setError(null)
+                    }}
+                  >
+                    <span className={`presence${u.online ? ' on' : ''}`} />
+                    <span className="user-name">{u.username}</span>
+                    <span className="user-state">{u.online ? 'online' : 'offline'}</span>
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+          <button className="btn btn-ghost logout" type="button" onClick={logout}>
+            Log out
+          </button>
+        </aside>
+
+        <section className="conversation">
+          {activePeer ? (
+            <>
+              <header className="conv-top">
+                <div>
+                  <h2 className="conv-title">{activePeer}</h2>
+                  <p className="peer-line">
+                    {activeUser?.online ? 'Online · end-to-end encrypted' : 'Offline · messaging disabled'}
+                  </p>
+                </div>
+                <div className="media-toggles">
+                  <button
+                    type="button"
+                    className={`toggle${micOn ? ' on' : ''}`}
+                    aria-pressed={micOn}
+                    aria-label="Microphone"
+                    onClick={() => void toggleMic()}
+                    disabled={!activeUser?.online}
+                  >
+                    <MicIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={`toggle${speakerOn ? ' on' : ''}`}
+                    aria-pressed={speakerOn}
+                    aria-label="Speaker"
+                    onClick={() => void toggleSpeaker()}
+                  >
+                    <SpeakerIcon />
+                  </button>
+                </div>
+              </header>
+
+              <div className="transcript" aria-live="polite">
+                {messages.map((m) => (
+                  <article
+                    key={m.id}
+                    className={`msg${m.self ? ' self' : ''}${m.system ? ' system' : ''}`}
+                  >
+                    {!m.system ? (
+                      <div className="msg-head">
+                        <span className="msg-name">{m.from}</span>
+                        <time>{m.at}</time>
+                      </div>
+                    ) : null}
+                    <div className="msg-body">{m.text}</div>
+                  </article>
+                ))}
+                <div ref={endRef} />
+              </div>
+
+              {error ? <p className="inline-error">{error}</p> : null}
+
+              <form className="composer" onSubmit={onSend}>
+                <input
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={activeUser?.online ? `Message ${activePeer}` : 'User is offline'}
+                  aria-label="Message"
+                  disabled={!activeUser?.online}
+                />
+                <button className="btn btn-primary" type="submit" disabled={!activeUser?.online}>
+                  Send
+                </button>
+              </form>
+            </>
+          ) : (
+            <div className="empty-conv">
+              <h2>Pick someone to chat</h2>
+              <p>1:1 messages are encrypted with each person’s public key.</p>
+            </div>
+          )}
+        </section>
+      </main>
     </div>
   )
 }
