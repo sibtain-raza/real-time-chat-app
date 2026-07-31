@@ -1,37 +1,26 @@
 package server_test
 
 import (
-	"net"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"securechat/internal/crypto"
 	"securechat/internal/protocol"
 	"securechat/internal/server"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestServerRelaysEncryptedText(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
+	srv := server.New("127.0.0.1:0", "", false)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
 
-	srv := server.New(addr, false)
-	go func() { _ = srv.ListenAndServe() }()
-	time.Sleep(100 * time.Millisecond)
-
-	alice, err := dialClient(addr, "alice", "room-key")
-	if err != nil {
-		t.Fatal(err)
-	}
+	alice := dialWS(t, ts.URL, "alice", "room-key")
 	defer alice.Close()
-
-	bob, err := dialClient(addr, "bob", "room-key")
-	if err != nil {
-		t.Fatal(err)
-	}
+	bob := dialWS(t, ts.URL, "bob", "room-key")
 	defer bob.Close()
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -46,13 +35,13 @@ func TestServerRelaysEncryptedText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := alice.Encoder.Encode(protocol.Packet{Type: protocol.TypeMessage, Message: enc}); err != nil {
+	if err := alice.WriteJSON(protocol.Packet{Type: protocol.TypeMessage, Message: enc}); err != nil {
 		t.Fatal(err)
 	}
 
-	_ = bob.Net.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = bob.SetReadDeadline(time.Now().Add(2 * time.Second))
 	var pkt protocol.Packet
-	if err := bob.Decoder.Decode(&pkt); err != nil {
+	if err := bob.ReadJSON(&pkt); err != nil {
 		t.Fatalf("bob did not receive message: %v", err)
 	}
 	if pkt.Type != protocol.TypeMessage || pkt.Name != "alice" {
@@ -67,15 +56,15 @@ func TestServerRelaysEncryptedText(t *testing.T) {
 	}
 }
 
-func dialClient(addr, name, key string) (*protocol.Conn, error) {
-	raw, err := net.DialTimeout("tcp", addr, time.Second)
+func dialWS(t *testing.T, httpURL, name, key string) *websocket.Conn {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(httpURL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
-		return nil, err
+		t.Fatalf("dial: %v", err)
 	}
-	c := protocol.NewConn(raw)
-	if err := c.Encoder.Encode(protocol.Handshake{Name: name, Key: key}); err != nil {
-		_ = c.Close()
-		return nil, err
+	if err := conn.WriteJSON(protocol.Handshake{Name: name, Key: key}); err != nil {
+		t.Fatalf("handshake: %v", err)
 	}
-	return c, nil
+	return conn
 }

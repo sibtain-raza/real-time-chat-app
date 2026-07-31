@@ -1,62 +1,46 @@
-# Go Rewrite: What We're Doing and Why
+# Go + React Rewrite: What We're Doing and Why
 
 ## What we're doing
 
-We're replacing the original Python secure chat application with a **Go** implementation that keeps the same product behavior:
+We're rebuilding the original Python tkinter chat app as:
+
+1. A **Go** WebSocket relay server
+2. A **React** browser UI (not a desktop toolkit UI)
+
+Same product behavior:
 
 - Multi-client real-time **text chat**
 - **Voice streaming** (mic / speaker toggles)
 - **Shared-key encryption** for message contents
-- A **desktop GUI client** plus a **TCP relay server**
-
-The Python sources (`Client.py`, `Server.py`) are removed. The app now lives under a standard Go module layout:
+- One place to connect: open the web app, enter name + key, chat
 
 ```
-cmd/server/          Server entrypoint
-cmd/client/          Fyne desktop client
-internal/audio/      PortAudio capture / playback
-internal/client/     Client networking + media control
-internal/crypto/     Key derivation + AES-256-GCM
-internal/protocol/   Handshake / packet types + NDJSON framing
-internal/server/     Multi-client relay logic
+cmd/server/          HTTP + WebSocket server
+internal/            Crypto, protocol, relay
+web/                 React + Vite client
 ```
 
 ## Why we're doing it
 
-### 1. Clearer structure
+### 1. A UI people can actually enjoy
 
-The Python version was mostly two large scripts. The Go rewrite splits networking, crypto, audio, protocol, and UI into packages so each piece is easier to read, test, and change.
+The Python GUI was functional but dated. React lets us ship a deliberate visual design: brand-forward connect screen, motion, responsive layout, and a calm chat room — without fighting tkinter layout constraints.
 
-### 2. Better concurrency model
+### 2. Browser reach
 
-Chat servers need many simultaneous connections and background audio work. Go's goroutines and channels fit that model more naturally than ad-hoc Python threads around sockets and PyAudio.
+Anyone with a modern browser can join. No Python runtime, no native GUI toolkit, no PortAudio install on each client machine.
 
-### 3. Stronger packaging and distribution
+### 3. Clearer backend structure
 
-A Go binary can be built once and run without a Python interpreter or `pip install cryptography pyaudio`. That makes deployment and local setup simpler (aside from system libs for GUI/audio).
+Go packages separate crypto, protocol, and relay logic. Goroutines fit multi-client WebSocket fan-out cleanly.
 
-### 4. Safer protocol framing
+### 4. Safer framing
 
-The Python client/server used fragile buffering that looked for a `"}` suffix to find message boundaries. The Go version uses **newline-delimited JSON (NDJSON)**, which is simpler and less error-prone for streaming JSON over TCP.
+Messages are JSON over WebSocket (one JSON object per frame). That replaces the old Python suffix-buffer heuristics.
 
 ### 5. Modern crypto defaults
 
-The original app used Fernet. The rewrite uses **AES-256-GCM** from Go's standard library:
-
-- Same user experience: enter a shared encryption key in the UI
-- Same key-shaping idea: pad/truncate the password to 32 bytes
-- Authenticated encryption (confidentiality + integrity) without a third-party crypto package
-
-### 6. Keep the product, not the language
-
-This is not a redesign of the chat product. Users still:
-
-1. Start the server
-2. Open the client
-3. Enter `IP:PORT`, name, and shared key
-4. Send text and optionally stream voice
-
-The goal is a maintainable Go codebase with equivalent features.
+**AES-256-GCM** on both sides (Go stdlib + Web Crypto), with the same 32-byte padded shared key idea as the original app.
 
 ## What stayed the same
 
@@ -66,52 +50,42 @@ The goal is a maintainable Go codebase with equivalent features.
 | Voice send/receive with mic and speaker toggles | Kept |
 | Shared encryption key among peers | Kept |
 | Server relays to other clients | Kept |
-| Voice only forwarded to clients with speaker enabled | Kept |
-| Default listen address `0.0.0.0:9090` | Kept |
-| Optional `all.log` server logging | Kept |
-| Desktop GUI | Kept (Fyne instead of tkinter) |
+| Voice only forwarded when speaker is enabled | Kept |
+| Default port `9090` | Kept |
+| Optional `all.log` logging | Kept |
 
 ## What changed intentionally
 
 | Area | Before | After | Reason |
 |------|--------|-------|--------|
-| Language | Python 3 | Go 1.22+ | Structure, concurrency, distribution |
-| GUI | tkinter | Fyne | Idiomatic cross-platform Go UI |
-| Audio | PyAudio | PortAudio (via `gordonklaus/portaudio`) | Common Go audio binding |
-| Encryption | Fernet | AES-256-GCM | Stdlib crypto, AEAD |
-| Framing | Suffix / buffer heuristics | NDJSON | Reliable message boundaries |
-| Layout | Two scripts | `cmd/` + `internal/` packages | Testable modules |
+| Language | Python | Go + TypeScript | Structure + web UI |
+| UI | tkinter / Fyne | React | Beautiful, portable browser UI |
+| Transport | Raw TCP | WebSocket | Browser-compatible |
+| Encryption | Fernet | AES-256-GCM | Stdlib / Web Crypto AEAD |
+| Audio | PyAudio / PortAudio | Web Audio + getUserMedia | No native deps on clients |
 
-## Why not keep Python?
+## Design intent for the UI
 
-Python is fine for a prototype. Rewriting in Go is useful when we want:
-
-- A single compiled server/client artifact
-- Package boundaries that match networking, crypto, and UI concerns
-- Easier concurrent connection handling
-- Tests that sit next to each package (`internal/crypto`, `internal/server`)
-
-If the goal were only a quick demo, Python would still work. This rewrite is for a cleaner long-term codebase with the same chat features.
+- **Brand first:** “ChatApp” is the hero of the first screen, not a nav label
+- **One job per view:** connect gate, then chat room
+- **Atmosphere:** full-bleed wave plane + mist gradients (coastal teal ink)
+- **Typography:** Bricolage Grotesque + Source Sans 3
+- **Motion:** gate rise, ambient wave drift, message enter
 
 ## How to run (quick)
 
 ```bash
-# System deps (Debian/Ubuntu)
-sudo apt-get install -y portaudio19-dev libgl-dev xorg-dev libxxf86vm-dev
-
-go mod tidy
+cd web && npm install && npm run build && cd ..
 go run ./cmd/server
-go run ./cmd/client
+# open http://localhost:9090
 ```
 
-See `README.md` for full setup, controls, and encryption details.
+See `README.md` for full setup.
 
 ## Success criteria
 
-This rewrite is “done” when:
-
-1. Server accepts multiple clients on TCP
-2. Encrypted text relays correctly between clients that share a key
+1. Server serves the React UI and accepts WebSocket clients
+2. Encrypted text relays between clients that share a key
 3. Voice streams when mic/speaker are enabled
-4. GUI covers connect/disconnect, chat, and media toggles
-5. `go test ./...` and `go build ./cmd/...` succeed
+4. UI works on desktop and mobile widths
+5. `go test ./...` and `npm run build` succeed

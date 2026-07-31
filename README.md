@@ -1,114 +1,93 @@
-# Secure Chat Application (Go)
+# Secure Chat Application
 
-A client-server chat application written in Go with text and voice messaging and AES-256-GCM encryption.
+A Go WebSocket chat server with a React web UI. Supports encrypted text and voice messaging.
 
 ## Features
 
-* **Text Messaging:** Send and receive text messages in real time.
-* **Voice Messaging:** Stream voice messages with microphone / speaker toggles.
-* **Encryption:** Messages are encrypted with AES-256-GCM using a shared user-provided key. The server decrypts with the sender key and re-encrypts for each recipient.
-* **Graphical User Interface:** The client uses [Fyne](https://fyne.io/) for a cross-platform desktop UI.
-* **Multi-client relay server:** TCP server on `0.0.0.0:9090` by default, with optional logging to `all.log`.
+* **Text messaging** in real time over WebSocket
+* **Voice streaming** via browser microphone / speaker toggles
+* **AES-256-GCM encryption** with a shared room key
+* **React UI** served by the Go server (or Vite in development)
 
-## Technologies
+## Stack
 
-* **Go 1.22+**
-* **Fyne** — client GUI
-* **PortAudio** (`gordonklaus/portaudio`) — voice capture / playback
-* **AES-256-GCM** — message encryption (`crypto/aes`)
-* **Newline-delimited JSON** over TCP for framing
+* **Go** — HTTP + WebSocket relay (`gorilla/websocket`)
+* **React + TypeScript + Vite** — desktop/mobile web client
+* **Web Crypto API** — client-side encrypt/decrypt
+* **Web Audio / getUserMedia** — voice capture and playback
 
 ## Project layout
 
 ```
-cmd/server/     Server entrypoint
-cmd/client/     Desktop client entrypoint
-internal/
-  audio/        PortAudio recorder / player
-  client/       Network + media client logic
-  crypto/       Key derivation and AES-GCM helpers
-  protocol/     Handshake / packet types and NDJSON framing
-  server/       Multi-client chat relay
+cmd/server/           Go server entrypoint
+internal/crypto/      AES-256-GCM helpers
+internal/protocol/    Handshake + packet types
+internal/server/      Relay + static UI hosting
+web/                  React client (Vite)
+REWRITE.md            Why this rewrite exists
 ```
 
 ## Prerequisites
 
-* Go 1.22 or newer
-* System libraries:
-  * PortAudio (`portaudio19-dev` on Debian/Ubuntu, `portaudio` on macOS via Homebrew)
-  * Fyne graphics deps (`libgl-dev`, `xorg-dev` / X11 headers on Linux)
+* Go 1.22+
+* Node.js 20+ (to build or develop the UI)
+
+## Build the UI
 
 ```bash
-# Debian / Ubuntu
-sudo apt-get install -y portaudio19-dev libgl-dev xorg-dev libxxf86vm-dev
-
-# macOS
-brew install portaudio
+cd web
+npm install
+npm run build
 ```
 
-## Build
+This writes production assets to `web/dist`.
+
+## Run the server
 
 ```bash
-go mod tidy
-go build -o bin/server ./cmd/server
-go build -o bin/client ./cmd/client
+go run ./cmd/server
+# optional flags:
+#   -addr 0.0.0.0:9090
+#   -web web/dist
+#   -debug=true
 ```
 
-## Run
+Open **http://localhost:9090**
 
-1. Start the server:
+## Develop the UI (hot reload)
+
+Terminal 1:
 
 ```bash
-./bin/server
-# or: go run ./cmd/server
+go run ./cmd/server
 ```
 
-The server listens on `0.0.0.0:9090` by default. Override with `-addr`:
+Terminal 2:
 
 ```bash
-./bin/server -addr 0.0.0.0:9090 -debug=true
+cd web
+npm run dev
 ```
 
-2. Start one or more clients:
+Vite proxies `/ws` and `/api` to the Go server on port 9090.
 
-```bash
-./bin/client
-# or: go run ./cmd/client
-```
+## How to use
 
-3. In the client UI:
-   * Enter `IP:PORT` (e.g. `127.0.0.1:9090`)
-   * Enter your display name
-   * Enter a shared encryption key (must match for peers who should understand each other)
-   * Click **Connect**
+1. Open the app in a browser
+2. Optionally set **Server** (`host:port`); leave blank when UI and API share a host
+3. Enter a **name** and shared **encryption key**
+4. Click **Enter room**
+5. Send text; toggle mic / speaker for voice
 
-## Client controls
-
-| Control | Purpose |
-|---------|---------|
-| Connect / Disconnect | Join or leave the server |
-| Mic On/Off | Start or stop streaming microphone audio |
-| Speaker On/Off | Enable or disable playback of incoming voice |
-| Message + Send | Send encrypted text (Enter also sends) |
-
-Voice packets are only forwarded by the server to clients that currently have speaker mode enabled.
-
-## Encryption details
-
-1. The user-provided key is padded or truncated to 32 bytes (same approach as the original Python app).
-2. That key is used as an AES-256-GCM key.
-3. Clients encrypt outbound text and voice payloads before sending.
-4. The server decrypts with the sender’s key and re-encrypts with each recipient’s key before relay.
-5. Anyone without the shared key cannot read message content.
+Peers need the same encryption key to understand each other. Voice packets are only forwarded to clients that currently have the speaker enabled.
 
 ## Tests
 
 ```bash
 go test ./...
+cd web && npm run build
 ```
 
 ## Icons
 
-Client window icons are from [Icons8](https://icons8.com):
-
-* `icons8-chat-48.png` — application window icon
+`icons8-chat-48.png` is from [Icons8](https://icons8.com).

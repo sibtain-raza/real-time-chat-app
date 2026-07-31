@@ -1,13 +1,6 @@
 package protocol
 
-import (
-	"bufio"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net"
-	"sync"
-)
+import "encoding/json"
 
 // Handshake is sent by the client immediately after connecting.
 type Handshake struct {
@@ -29,71 +22,18 @@ const (
 	TypeSetting = "setting"
 )
 
-// Encoder writes newline-delimited JSON frames.
-type Encoder struct {
-	mu sync.Mutex
-	w  *bufio.Writer
+// Transport is a bidirectional JSON messaging connection (TCP or WebSocket).
+type Transport interface {
+	ReadJSON(v any) error
+	WriteJSON(v any) error
+	Close() error
+	RemoteAddr() string
 }
 
-func NewEncoder(w io.Writer) *Encoder {
-	return &Encoder{w: bufio.NewWriter(w)}
+func Marshal(v any) ([]byte, error) {
+	return json.Marshal(v)
 }
 
-func (e *Encoder) Encode(v any) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	data, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if _, err := e.w.Write(data); err != nil {
-		return err
-	}
-	if err := e.w.WriteByte('\n'); err != nil {
-		return err
-	}
-	return e.w.Flush()
-}
-
-// Decoder reads newline-delimited JSON frames.
-type Decoder struct {
-	r *bufio.Reader
-}
-
-func NewDecoder(r io.Reader) *Decoder {
-	return &Decoder{r: bufio.NewReader(r)}
-}
-
-func (d *Decoder) Decode(v any) error {
-	line, err := d.r.ReadBytes('\n')
-	if err != nil {
-		return err
-	}
-	if len(line) == 0 {
-		return fmt.Errorf("empty frame")
-	}
-	return json.Unmarshal(line, v)
-}
-
-// Conn wraps a TCP connection with NDJSON encode/decode helpers.
-type Conn struct {
-	Net     net.Conn
-	Encoder *Encoder
-	Decoder *Decoder
-}
-
-func NewConn(c net.Conn) *Conn {
-	return &Conn{
-		Net:     c,
-		Encoder: NewEncoder(c),
-		Decoder: NewDecoder(c),
-	}
-}
-
-func (c *Conn) Close() error {
-	return c.Net.Close()
-}
-
-func (c *Conn) RemoteAddr() net.Addr {
-	return c.Net.RemoteAddr()
+func Unmarshal(data []byte, v any) error {
+	return json.Unmarshal(data, v)
 }

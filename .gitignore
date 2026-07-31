@@ -2,3 +2,6 @@ bin/
 all.log
 *.exe
 .DS_Store
+web/node_modules/
+web/dist/
+*.log
