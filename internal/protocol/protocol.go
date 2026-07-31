@@ -3,26 +3,43 @@ package protocol
 import "encoding/json"
 
 // Handshake is sent by the client immediately after connecting.
+// PublicKey is a base64-encoded uncompressed P-256 ECDH public key.
 type Handshake struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
+	Name      string `json:"name"`
+	PublicKey string `json:"publicKey"`
+}
+
+// Peer is a connected user identity announced by the server.
+type Peer struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"publicKey"`
+}
+
+// Envelope is ciphertext intended for one recipient public key.
+type Envelope struct {
+	To      string `json:"to"`      // recipient public key (base64)
+	Message string `json:"message"` // AES-GCM ciphertext (base64)
 }
 
 // Packet is the common envelope for all post-handshake messages.
 type Packet struct {
-	Type    string `json:"type"`              // "message", "voice", or "setting"
-	Name    string `json:"name,omitempty"`    // set by server when relaying
-	Message string `json:"message,omitempty"` // encrypted payload (text or voice)
-	Voice   string `json:"voice,omitempty"`   // "on" or "off" for setting packets
+	Type       string     `json:"type"` // message | voice | setting | peers
+	Name       string     `json:"name,omitempty"`
+	PublicKey  string     `json:"publicKey,omitempty"` // sender public key
+	Message    string     `json:"message,omitempty"`   // single-recipient ciphertext after server routing
+	Voice      string     `json:"voice,omitempty"`
+	Envelopes  []Envelope `json:"envelopes,omitempty"`
+	Peers      []Peer     `json:"peers,omitempty"`
 }
 
 const (
 	TypeMessage = "message"
 	TypeVoice   = "voice"
 	TypeSetting = "setting"
+	TypePeers   = "peers"
 )
 
-// Transport is a bidirectional JSON messaging connection (TCP or WebSocket).
+// Transport is a bidirectional JSON messaging connection.
 type Transport interface {
 	ReadJSON(v any) error
 	WriteJSON(v any) error

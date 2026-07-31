@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"securechat/internal/crypto"
 	"securechat/internal/protocol"
 
 	"github.com/gorilla/websocket"
@@ -20,10 +19,11 @@ import (
 type Client struct {
 	transport protocol.Transport
 	name      string
-	key       string
+	publicKey string
 }
 
-// Server is a multi-client encrypted chat relay with a React web UI.
+// Server is a multi-client E2E chat relay with a React web UI.
+// It never decrypts message contents — only routes opaque envelopes by public key.
 type Server struct {
 	addr      string
 	webDir    string
@@ -121,32 +121,30 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.serveClient(t)
 }
 
-func (s *Server) ServeTransport(t protocol.Transport) {
-	s.serveClient(t)
-}
-
 func (s *Server) serveClient(t protocol.Transport) {
 	var hs protocol.Handshake
 	if err := t.ReadJSON(&hs); err != nil {
 		_ = t.Close()
 		return
 	}
-	if hs.Name == "" || hs.Key == "" {
+	if hs.Name == "" || hs.PublicKey == "" {
 		_ = t.Close()
 		return
 	}
 
-	client := &Client{transport: t, name: hs.Name, key: hs.Key}
+	client := &Client{transport: t, name: hs.Name, publicKey: hs.PublicKey}
 	s.mu.Lock()
 	s.clients[client] = struct{}{}
 	s.mu.Unlock()
 
 	s.logf("Connected %s as %q", t.RemoteAddr(), hs.Name)
+	s.broadcastPeers()
 
 	defer func() {
 		s.removeClient(client)
 		_ = t.Close()
 		s.logf("Disconnected %s (%s)", t.RemoteAddr(), hs.Name)
+		s.broadcastPeers()
 	}()
 
 	for {
@@ -165,6 +163,23 @@ func (s *Server) removeClient(client *Client) {
 	delete(s.streaming, client)
 }
 
+func (s *Server) peerList() []protocol.Peer {
+	peers := make([]protocol.Peer, 0, len(s.clients))
+	for c := range s.clients {
+		peers = append(peers, protocol.Peer{Name: c.name, PublicKey: c.publicKey})
+	}
+	return peers
+}
+
+func (s *Server) broadcastPeers() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pkt := protocol.Packet{Type: protocol.TypePeers, Peers: s.peerList()}
+	for c := range s.clients {
+		_ = c.transport.WriteJSON(pkt)
+	}
+}
+
 func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 	switch pkt.Type {
 	case protocol.TypeSetting:
@@ -177,61 +192,55 @@ func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 		s.mu.Unlock()
 
 	case protocol.TypeMessage:
-		plain, err := crypto.Decrypt(pkt.Message, sender.key)
-		if err != nil {
-			s.logf("decrypt text from %s failed: %v", sender.name, err)
-			return
-		}
-		s.relayText(sender, plain)
+		s.routeEnvelopes(sender, protocol.TypeMessage, pkt.Envelopes)
 
 	case protocol.TypeVoice:
-		plain, err := crypto.Decrypt(pkt.Message, sender.key)
-		if err != nil {
-			s.logf("decrypt voice from %s failed: %v", sender.name, err)
-			return
-		}
-		s.relayVoice(sender, plain)
+		s.routeVoiceEnvelopes(sender, pkt.Envelopes)
 
 	default:
 		s.logf("unknown packet type %q from %s", pkt.Type, sender.name)
 	}
 }
 
-func (s *Server) relayText(sender *Client, plain []byte) {
+func (s *Server) routeEnvelopes(sender *Client, typ string, envelopes []protocol.Envelope) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	byKey := make(map[string]*Client, len(s.clients))
 	for c := range s.clients {
-		if c == sender {
-			continue
-		}
-		enc, err := crypto.Encrypt(plain, c.key)
-		if err != nil {
+		byKey[c.publicKey] = c
+	}
+	for _, env := range envelopes {
+		c := byKey[env.To]
+		if c == nil || c == sender {
 			continue
 		}
 		out := protocol.Packet{
-			Type:    protocol.TypeMessage,
-			Name:    sender.name,
-			Message: enc,
+			Type:      typ,
+			Name:      sender.name,
+			PublicKey: sender.publicKey,
+			Message:   env.Message,
 		}
 		_ = c.transport.WriteJSON(out)
 	}
 }
 
-func (s *Server) relayVoice(sender *Client, plain []byte) {
+func (s *Server) routeVoiceEnvelopes(sender *Client, envelopes []protocol.Envelope) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	streaming := make(map[string]*Client, len(s.streaming))
 	for c := range s.streaming {
-		if c == sender {
-			continue
-		}
-		enc, err := crypto.Encrypt(plain, c.key)
-		if err != nil {
+		streaming[c.publicKey] = c
+	}
+	for _, env := range envelopes {
+		c := streaming[env.To]
+		if c == nil || c == sender {
 			continue
 		}
 		out := protocol.Packet{
-			Type:    protocol.TypeVoice,
-			Name:    sender.name,
-			Message: enc,
+			Type:      protocol.TypeVoice,
+			Name:      sender.name,
+			PublicKey: sender.publicKey,
+			Message:   env.Message,
 		}
 		_ = c.transport.WriteJSON(out)
 	}

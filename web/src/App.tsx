@@ -27,6 +27,8 @@ export default function App() {
     status,
     error,
     messages,
+    peers,
+    keyPrint,
     micOn,
     speakerOn,
     connect,
@@ -38,7 +40,6 @@ export default function App() {
 
   const [host, setHost] = useState('')
   const [name, setName] = useState('')
-  const [key, setKey] = useState('')
   const [draft, setDraft] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
 
@@ -48,9 +49,9 @@ export default function App() {
 
   async function onConnect(e: FormEvent) {
     e.preventDefault()
-    if (!name.trim() || !key.trim()) return
+    if (!name.trim()) return
     try {
-      await connect(host.trim(), name.trim(), key)
+      await connect(host.trim(), name.trim())
     } catch {
       // error state handled in hook
     }
@@ -74,7 +75,9 @@ export default function App() {
         <main className="gate">
           <div className="gate-inner">
             <h1 className="brand">ChatApp</h1>
-            <p className="tagline">Encrypted rooms for voices and words.</p>
+            <p className="tagline">
+              A private keypair is created for you when you enter — no shared password to type.
+            </p>
 
             <form className="gate-form" onSubmit={onConnect}>
               <div className="field">
@@ -98,21 +101,13 @@ export default function App() {
                   autoComplete="nickname"
                 />
               </div>
-              <div className="field">
-                <label htmlFor="key">Encryption key</label>
-                <input
-                  id="key"
-                  type="password"
-                  value={key}
-                  onChange={(e) => setKey(e.target.value)}
-                  placeholder="Shared secret for this room"
-                  required
-                  autoComplete="off"
-                />
-              </div>
+              <p className="key-note">
+                On join we generate an ECDH P-256 public/private key pair in your browser. Messages
+                are encrypted to each peer’s public key; the server only relays ciphertext.
+              </p>
               <div className="cta-row">
                 <button className="btn btn-primary" type="submit" disabled={status === 'connecting'}>
-                  {status === 'connecting' ? 'Connecting…' : 'Enter room'}
+                  {status === 'connecting' ? 'Creating keys…' : 'Enter room'}
                 </button>
               </div>
               {error ? <p className="gate-error">{error}</p> : null}
@@ -122,17 +117,29 @@ export default function App() {
       ) : (
         <main className="room">
           <header className="room-top">
-            <h1 className="room-brand">ChatApp</h1>
+            <div>
+              <h1 className="room-brand">ChatApp</h1>
+              {keyPrint ? <p className="key-print">Your key · {keyPrint}</p> : null}
+            </div>
             <div className="room-meta">
               <span>
                 <span className="status-dot" />
                 {name}
+                {peers.length > 0 ? ` · ${peers.length} peer${peers.length === 1 ? '' : 's'}` : ''}
               </span>
               <button className="btn btn-ghost" type="button" onClick={disconnect}>
                 Leave
               </button>
             </div>
           </header>
+
+          {peers.length > 0 ? (
+            <p className="peer-line">
+              Talking with {peers.map((p) => p.name).join(', ')}
+            </p>
+          ) : (
+            <p className="peer-line">Waiting for someone else to join…</p>
+          )}
 
           <section className="transcript" aria-live="polite">
             {messages.map((m) => (

@@ -7,12 +7,12 @@ We're rebuilding the original Python tkinter chat app as:
 1. A **Go** WebSocket relay server
 2. A **React** browser UI (not a desktop toolkit UI)
 
-Same product behavior:
+Same product behavior, with stronger crypto UX:
 
 - Multi-client real-time **text chat**
 - **Voice streaming** (mic / speaker toggles)
-- **Shared-key encryption** for message contents
-- One place to connect: open the web app, enter name + key, chat
+- **Per-user ECDH key pairs** (no shared password to type)
+- One place to connect: open the web app, enter a name, chat
 
 ```
 cmd/server/          HTTP + WebSocket server
@@ -40,7 +40,7 @@ Messages are JSON over WebSocket (one JSON object per frame). That replaces the 
 
 ### 5. Modern crypto defaults
 
-**AES-256-GCM** on both sides (Go stdlib + Web Crypto), with the same 32-byte padded shared key idea as the original app.
+Each client creates an **ECDH P-256** key pair automatically. Messages use **ECDH + AES-256-GCM** envelopes per recipient. The server never sees plaintext and never holds private keys.
 
 ## What stayed the same
 
@@ -48,8 +48,8 @@ Messages are JSON over WebSocket (one JSON object per frame). That replaces the 
 |---------|--------|
 | Text messaging with timestamps and sender names | Kept |
 | Voice send/receive with mic and speaker toggles | Kept |
-| Shared encryption key among peers | Kept |
-| Server relays to other clients | Kept |
+| Shared encryption password field | Removed — replaced by auto key pairs |
+| Server relays to other clients | Kept (opaque envelopes) |
 | Voice only forwarded when speaker is enabled | Kept |
 | Default port `9090` | Kept |
 | Optional `all.log` logging | Kept |
@@ -61,7 +61,7 @@ Messages are JSON over WebSocket (one JSON object per frame). That replaces the 
 | Language | Python | Go + TypeScript | Structure + web UI |
 | UI | tkinter / Fyne | React | Beautiful, portable browser UI |
 | Transport | Raw TCP | WebSocket | Browser-compatible |
-| Encryption | Fernet | AES-256-GCM | Stdlib / Web Crypto AEAD |
+| Encryption | Shared Fernet/AES password | ECDH P-256 + AES-GCM per peer | Real E2E, no password UX |
 | Audio | PyAudio / PortAudio | Web Audio + getUserMedia | No native deps on clients |
 
 ## Design intent for the UI
