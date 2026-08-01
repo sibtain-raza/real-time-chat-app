@@ -7,3 +7,4 @@ web/dist/
 *.log
 chatapp.db
 chatapp.db-*
+certs/
