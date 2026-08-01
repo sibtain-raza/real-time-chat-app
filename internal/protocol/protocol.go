@@ -17,22 +17,27 @@ type UserInfo struct {
 
 // Packet is the common envelope for post-handshake messages.
 type Packet struct {
-	Type      string     `json:"type"` // message | voice | setting | users | error
-	From      string     `json:"from,omitempty"`
-	To        string     `json:"to,omitempty"` // target username for 1:1
-	PublicKey string     `json:"publicKey,omitempty"`
-	Message   string     `json:"message,omitempty"`
-	Voice     string     `json:"voice,omitempty"`
-	Users     []UserInfo `json:"users,omitempty"`
-	Error     string     `json:"error,omitempty"`
+	Type      string          `json:"type"`
+	From      string          `json:"from,omitempty"`
+	To        string          `json:"to,omitempty"`
+	PublicKey string          `json:"publicKey,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Voice     string          `json:"voice,omitempty"`
+	Users     []UserInfo      `json:"users,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Signal    json.RawMessage `json:"signal,omitempty"` // WebRTC SDP / ICE payload
 }
 
 const (
-	TypeMessage = "message"
-	TypeVoice   = "voice"
-	TypeSetting = "setting"
-	TypeUsers   = "users"
-	TypeError   = "error"
+	TypeMessage    = "message"
+	TypeVoice      = "voice"
+	TypeSetting    = "setting"
+	TypeUsers      = "users"
+	TypeError      = "error"
+	TypeCallOffer  = "call-offer"
+	TypeCallAnswer = "call-answer"
+	TypeCallIce    = "call-ice"
+	TypeCallHangup = "call-hangup"
 )
 
 type Transport interface {
@@ -48,4 +53,13 @@ func Marshal(v any) ([]byte, error) {
 
 func Unmarshal(data []byte, v any) error {
 	return json.Unmarshal(data, v)
+}
+
+func IsCallType(t string) bool {
+	switch t {
+	case TypeCallOffer, TypeCallAnswer, TypeCallIce, TypeCallHangup:
+		return true
+	default:
+		return false
+	}
 }

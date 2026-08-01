@@ -337,6 +337,28 @@ func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 		}
 		_ = target.transport.WriteJSON(out)
 
+	case protocol.TypeCallOffer, protocol.TypeCallAnswer, protocol.TypeCallIce, protocol.TypeCallHangup:
+		if pkt.To == "" {
+			return
+		}
+		s.mu.RLock()
+		target, ok := s.clients[pkt.To]
+		s.mu.RUnlock()
+		if !ok {
+			_ = sender.transport.WriteJSON(protocol.Packet{
+				Type:  protocol.TypeError,
+				Error: pkt.To + " is offline",
+			})
+			return
+		}
+		out := protocol.Packet{
+			Type:   pkt.Type,
+			From:   sender.username,
+			To:     pkt.To,
+			Signal: pkt.Signal,
+		}
+		_ = target.transport.WriteJSON(out)
+
 	default:
 		s.logf("unknown packet type %q from %s", pkt.Type, sender.username)
 	}
