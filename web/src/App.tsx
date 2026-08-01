@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { VideoCall } from './components/VideoCall'
 import { WavePlane } from './components/WavePlane'
 import { useChat } from './hooks/useChat'
 import { useVideoCall } from './hooks/useVideoCall'
+import { fingerprint } from './lib/crypto'
+import { clearTrust, markVerified, trustStatus } from './lib/safety'
 
 function MicIcon() {
   return (
@@ -50,6 +52,7 @@ export default function App() {
     speakerOn,
     host,
     setHost,
+    historyLoading,
     signup,
     login,
     logout,
@@ -60,18 +63,29 @@ export default function App() {
     setCallHandler,
   } = useChat()
 
-  const call = useVideoCall({ sendPacket, setCallHandler })
+  const call = useVideoCall({ sendPacket, setCallHandler, host })
 
   const [mode, setMode] = useState<'login' | 'signup'>('signup')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
+  const [trustTick, setTrustTick] = useState(0)
   const endRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, activePeer])
+
+  const activeUser = users.find((u) => u.username === activePeer)
+  const peerTrust = useMemo(() => {
+    if (!session || !activePeer || !activeUser?.publicKey) return null
+    void trustTick
+    return {
+      status: trustStatus(session.username, activePeer, activeUser.publicKey),
+      print: fingerprint(activeUser.publicKey),
+    }
+  }, [session, activePeer, activeUser?.publicKey, trustTick])
 
   async function onAuth(e: FormEvent) {
     e.preventDefault()
@@ -97,7 +111,7 @@ export default function App() {
   }
 
   const connected = Boolean(session) && status === 'connected'
-  const activeUser = users.find((u) => u.username === activePeer)
+  const canMessage = Boolean(activeUser?.publicKey)
 
   if (!session) {
     return (
@@ -155,15 +169,15 @@ export default function App() {
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="at least 6 characters"
+                  placeholder="8+ chars with a letter and number"
                   required
-                  minLength={6}
+                  minLength={8}
                   autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 />
               </div>
               <p className="key-note">
                 After you {mode === 'signup' ? 'sign up' : 'log in'}, we create or restore your ECDH
-                key pair in this browser and open private 1:1 chats and video calls.
+                key pair. Prefer HTTPS in production for camera/mic and transport security.
               </p>
               <div className="cta-row">
                 <button className="btn btn-primary" type="submit" disabled={busy}>
@@ -189,7 +203,7 @@ export default function App() {
               {status === 'connecting' ? 'Connecting secure session…' : 'Reconnecting…'}
             </p>
             {error ? <p className="gate-error">{error}</p> : null}
-            <button className="btn btn-ghost" type="button" onClick={logout}>
+            <button className="btn btn-ghost" type="button" onClick={() => void logout()}>
               Log out
             </button>
           </div>
@@ -247,7 +261,7 @@ export default function App() {
               ))
             )}
           </ul>
-          <button className="btn btn-ghost logout" type="button" onClick={logout}>
+          <button className="btn btn-ghost logout" type="button" onClick={() => void logout()}>
             Log out
           </button>
         </aside>
@@ -259,10 +273,44 @@ export default function App() {
                 <div>
                   <h2 className="conv-title">{activePeer}</h2>
                   <p className="peer-line">
-                    {activeUser?.online
-                      ? 'Online · end-to-end encrypted'
-                      : 'Offline · messaging disabled'}
+                    {activeUser?.online ? 'Online' : 'Offline'} · end-to-end encrypted
+                    {historyLoading ? ' · loading history…' : ''}
                   </p>
+                  {peerTrust ? (
+                    <div className={`trust-row ${peerTrust.status}`}>
+                      <span>
+                        Safety number · <code>{peerTrust.print}</code>
+                        {peerTrust.status === 'verified'
+                          ? ' · verified'
+                          : peerTrust.status === 'changed'
+                            ? ' · key changed!'
+                            : ' · unverified'}
+                      </span>
+                      {peerTrust.status !== 'verified' && activeUser?.publicKey ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => {
+                            markVerified(session.username, activePeer, activeUser.publicKey)
+                            setTrustTick((n) => n + 1)
+                          }}
+                        >
+                          Mark verified
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={() => {
+                            clearTrust(session.username, activePeer)
+                            setTrustTick((n) => n + 1)
+                          }}
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="media-toggles">
                   <button
@@ -322,11 +370,15 @@ export default function App() {
                 <input
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder={activeUser?.online ? `Message ${activePeer}` : 'User is offline'}
+                  placeholder={
+                    canMessage
+                      ? `Message ${activePeer}`
+                      : 'Waiting for their public key'
+                  }
                   aria-label="Message"
-                  disabled={!activeUser?.online}
+                  disabled={!canMessage}
                 />
-                <button className="btn btn-primary" type="submit" disabled={!activeUser?.online}>
+                <button className="btn btn-primary" type="submit" disabled={!canMessage}>
                   Send
                 </button>
               </form>

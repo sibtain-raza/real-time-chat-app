@@ -26,19 +26,35 @@ type Client struct {
 	publicKey string
 }
 
-type Server struct {
-	addr      string
-	webDir    string
-	store     *auth.Store
-	mu        sync.RWMutex
-	clients   map[string]*Client // username -> client (one active session)
-	streaming map[string]bool
-	logger    *log.Logger
-	debug     bool
-	upgrader  websocket.Upgrader
+// ICEServer is passed to browsers for WebRTC.
+type ICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
 }
 
-func New(addr, webDir string, store *auth.Store, debug bool) *Server {
+// Config holds optional TLS and ICE/TURN settings.
+type Config struct {
+	Addr     string
+	WebDir   string
+	TLSCert  string
+	TLSKey   string
+	Debug    bool
+	ICEServers []ICEServer
+}
+
+type Server struct {
+	cfg       Config
+	store     *auth.Store
+	mu        sync.RWMutex
+	clients   map[string]*Client
+	streaming map[string]bool
+	logger    *log.Logger
+	upgrader  websocket.Upgrader
+	authLimit *RateLimiter
+}
+
+func New(cfg Config, store *auth.Store) *Server {
 	f, err := os.OpenFile("all.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	var logger *log.Logger
 	if err != nil {
@@ -46,24 +62,29 @@ func New(addr, webDir string, store *auth.Store, debug bool) *Server {
 	} else {
 		logger = log.New(f, "", log.LstdFlags)
 	}
+	if len(cfg.ICEServers) == 0 {
+		cfg.ICEServers = []ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+			{URLs: []string{"stun:stun1.l.google.com:19302"}},
+		}
+	}
 	return &Server{
-		addr:      addr,
-		webDir:    webDir,
+		cfg:       cfg,
 		store:     store,
 		clients:   make(map[string]*Client),
 		streaming: make(map[string]bool),
 		logger:    logger,
-		debug:     debug,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		authLimit: NewRateLimiter(15*time.Minute, 20),
 	}
 }
 
 func (s *Server) logf(format string, args ...any) {
 	msg := fmt.Sprintf("[%s] %s", time.Now().Format("03:04:05 PM"), fmt.Sprintf(format, args...))
 	fmt.Println(msg)
-	if s.debug {
+	if s.cfg.Debug {
 		s.logger.Println(msg)
 	}
 }
@@ -78,14 +99,17 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tls": s.cfg.TLSCert != ""})
 	})
+	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/signup", s.handleSignup)
 	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/users", s.handleUsers)
+	mux.HandleFunc("/api/messages", s.handleMessages)
 
-	if s.webDir != "" {
-		webDir := s.webDir
+	if s.cfg.WebDir != "" {
+		webDir := s.cfg.WebDir
 		if abs, err := filepath.Abs(webDir); err == nil {
 			webDir = abs
 		}
@@ -108,16 +132,26 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) ListenAndServe() error {
-	ln, err := net.Listen("tcp", s.addr)
+	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {
 		return err
 	}
-	s.logf("Server start on http://%s (ws://%s/ws)", ln.Addr().String(), ln.Addr().String())
+	scheme := "http"
+	wsScheme := "ws"
+	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
+		scheme = "https"
+		wsScheme = "wss"
+	}
+	s.logf("Server start on %s://%s (%s://%s/ws)", scheme, ln.Addr().String(), wsScheme, ln.Addr().String())
+	if s.cfg.TLSCert != "" && s.cfg.TLSKey != "" {
+		return http.ServeTLS(ln, s.Handler(), s.cfg.TLSCert, s.cfg.TLSKey)
+	}
 	return http.Serve(ln, s.Handler())
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -128,9 +162,24 @@ func readJSON(r *http.Request, v any) error {
 	return dec.Decode(v)
 }
 
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"iceServers": s.cfg.ICEServers,
+		"tls":        s.cfg.TLSCert != "",
+	})
+}
+
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	if !s.authLimit.Allow(clientIP(r.RemoteAddr)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try later"})
 		return
 	}
 	var body struct {
@@ -165,6 +214,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
 		return
 	}
+	if !s.authLimit.Allow(clientIP(r.RemoteAddr)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many attempts, try later"})
+		return
+	}
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -188,6 +241,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	token := strings.TrimPrefix(h, "Bearer ")
+	_ = s.store.DeleteSession(token)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *Server) bearerUser(r *http.Request) (string, error) {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Bearer ") {
@@ -206,6 +274,29 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": s.directory()})
+}
+
+func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	user, err := s.bearerUser(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	peer := strings.TrimSpace(r.URL.Query().Get("peer"))
+	if peer == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "peer query required"})
+		return
+	}
+	msgs, err := s.store.ListMessages(user, peer, 200)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not load messages"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 }
 
 func (s *Server) directory() []protocol.UserInfo {
@@ -310,7 +401,36 @@ func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 		}
 		s.mu.Unlock()
 
-	case protocol.TypeMessage, protocol.TypeVoice:
+	case protocol.TypeMessage:
+		if pkt.To == "" || pkt.Message == "" {
+			return
+		}
+		// Persist recipient copy (and optional sender self-copy for history).
+		_, _ = s.store.SaveMessageCopy(pkt.To, sender.username, sender.username, pkt.Message, sender.publicKey)
+		if pkt.SelfCopy != "" {
+			_, _ = s.store.SaveMessageCopy(sender.username, pkt.To, sender.username, pkt.SelfCopy, sender.publicKey)
+		}
+		s.mu.RLock()
+		target, ok := s.clients[pkt.To]
+		s.mu.RUnlock()
+		if !ok {
+			// Stored for later; notify sender that peer is offline.
+			_ = sender.transport.WriteJSON(protocol.Packet{
+				Type:  protocol.TypeError,
+				Error: pkt.To + " is offline — message saved for when they return",
+			})
+			return
+		}
+		out := protocol.Packet{
+			Type:      protocol.TypeMessage,
+			From:      sender.username,
+			To:        pkt.To,
+			PublicKey: sender.publicKey,
+			Message:   pkt.Message,
+		}
+		_ = target.transport.WriteJSON(out)
+
+	case protocol.TypeVoice:
 		if pkt.To == "" || pkt.Message == "" {
 			return
 		}
@@ -318,18 +438,11 @@ func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 		target, ok := s.clients[pkt.To]
 		streaming := s.streaming[pkt.To]
 		s.mu.RUnlock()
-		if !ok {
-			_ = sender.transport.WriteJSON(protocol.Packet{
-				Type:  protocol.TypeError,
-				Error: pkt.To + " is offline",
-			})
-			return
-		}
-		if pkt.Type == protocol.TypeVoice && !streaming {
+		if !ok || !streaming {
 			return
 		}
 		out := protocol.Packet{
-			Type:      pkt.Type,
+			Type:      protocol.TypeVoice,
 			From:      sender.username,
 			To:        pkt.To,
 			PublicKey: sender.publicKey,

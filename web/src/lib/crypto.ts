@@ -131,11 +131,13 @@ export async function decryptTextFrom(
   return new TextDecoder().decode(bytes)
 }
 
-export function fingerprint(publicKeyB64: string): string {
+export function fingerprint(publicKeyB64: string, bytes = 8): string {
   const raw = fromBase64(publicKeyB64)
-  let hex = ''
-  for (let i = 0; i < Math.min(4, raw.length); i++) {
-    hex += raw[i].toString(16).padStart(2, '0')
+  const parts: string[] = []
+  for (let i = 0; i < Math.min(bytes, raw.length); i++) {
+    parts.push(raw[i].toString(16).padStart(2, '0'))
   }
-  return hex
+  // Group as safety-number style chunks: abcd efgh ...
+  const hex = parts.join('')
+  return hex.replace(/(.{4})/g, '$1 ').trim()
 }

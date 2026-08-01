@@ -15,14 +15,14 @@ func TestSignUpLoginAndSession(t *testing.T) {
 	}
 	defer store.Close()
 
-	if err := store.SignUp("ada", "secret1"); err != nil {
+	if err := store.SignUp("ada", "secret12"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SignUp("ada", "secret1"); err != auth.ErrUserExists {
+	if err := store.SignUp("ada", "secret12"); err != auth.ErrUserExists {
 		t.Fatalf("expected ErrUserExists, got %v", err)
 	}
 
-	token, err := store.Login("ada", "secret1")
+	token, err := store.Login("ada", "secret12")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,8 +30,11 @@ func TestSignUpLoginAndSession(t *testing.T) {
 	if err != nil || user != "ada" {
 		t.Fatalf("token lookup: %v %q", err, user)
 	}
-	if _, err := store.Login("ada", "wrong"); err != auth.ErrBadCreds {
+	if _, err := store.Login("ada", "wrongxxx"); err != auth.ErrBadCreds {
 		t.Fatalf("expected bad creds, got %v", err)
+	}
+	if err := store.SignUp("bob", "short"); err != auth.ErrBadPassword {
+		t.Fatalf("expected bad password, got %v", err)
 	}
 
 	if err := store.SetPublicKey("ada", "pubkey"); err != nil {

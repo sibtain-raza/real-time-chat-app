@@ -600,6 +600,35 @@ button {
   font-size: 0.9rem;
 }
 
+.trust-row {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.trust-row code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+
+.trust-row.verified {
+  color: var(--ok);
+}
+
+.trust-row.changed {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.trust-row .btn-ghost {
+  font-size: 0.8rem;
+  padding: 0.2rem 0;
+}
+
 .toggle:disabled {
   opacity: 0.4;
   cursor: not-allowed;

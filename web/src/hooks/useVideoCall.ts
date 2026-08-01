@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CallSignal, Packet } from '../lib/protocol'
+import type { CallSignal, ICEServer, Packet } from '../lib/protocol'
+import { apiURL } from '../lib/protocol'
 
 export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'active'
 
-const ICE_SERVERS: RTCIceServer[] = [
+const DEFAULT_ICE: ICEServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
 ]
@@ -12,11 +13,11 @@ type SendPacket = (pkt: Packet) => void
 
 type Options = {
   sendPacket: SendPacket
-  /** Register a handler for inbound call signaling packets. */
   setCallHandler: (handler: ((pkt: Packet) => void) | null) => void
+  host?: string
 }
 
-export function useVideoCall({ sendPacket, setCallHandler }: Options) {
+export function useVideoCall({ sendPacket, setCallHandler, host = '' }: Options) {
   const [phase, setPhase] = useState<CallPhase>('idle')
   const [peer, setPeer] = useState<string | null>(null)
   const [muted, setMuted] = useState(false)
@@ -27,22 +28,33 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
   const localStreamRef = useRef<MediaStream | null>(null)
   const remoteStreamRef = useRef<MediaStream | null>(null)
   const peerRef = useRef<string | null>(null)
-  const makingOfferRef = useRef(false)
   const localVideoRef = useRef<HTMLVideoElement | null>(null)
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null)
+  const iceRef = useRef<ICEServer[]>(DEFAULT_ICE)
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch(apiURL('/api/config', host))
+        if (!res.ok) return
+        const data = (await res.json()) as { iceServers?: ICEServer[] }
+        if (data.iceServers?.length) {
+          iceRef.current = data.iceServers
+        }
+      } catch {
+        // keep defaults
+      }
+    })()
+  }, [host])
 
   const attachLocalVideo = useCallback((el: HTMLVideoElement | null) => {
     localVideoRef.current = el
-    if (el && localStreamRef.current) {
-      el.srcObject = localStreamRef.current
-    }
+    if (el && localStreamRef.current) el.srcObject = localStreamRef.current
   }, [])
 
   const attachRemoteVideo = useCallback((el: HTMLVideoElement | null) => {
     remoteVideoRef.current = el
-    if (el && remoteStreamRef.current) {
-      el.srcObject = remoteStreamRef.current
-    }
+    if (el && remoteStreamRef.current) el.srcObject = remoteStreamRef.current
   }, [])
 
   const cleanupMedia = useCallback(() => {
@@ -54,7 +66,6 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
     if (localVideoRef.current) localVideoRef.current.srcObject = null
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null
     peerRef.current = null
-    makingOfferRef.current = false
     setPeer(null)
     setMuted(false)
     setCameraOff(false)
@@ -64,7 +75,7 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
   const ensurePeerConnection = useCallback(
     (username: string) => {
       if (pcRef.current) return pcRef.current
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+      const pc = new RTCPeerConnection({ iceServers: iceRef.current as RTCIceServer[] })
       pcRef.current = pc
       peerRef.current = username
       setPeer(username)
@@ -92,9 +103,7 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
         const state = pc.connectionState
         if (state === 'connected') setPhase('active')
         if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-          if (peerRef.current) {
-            sendPacket({ type: 'call-hangup', to: peerRef.current })
-          }
+          if (peerRef.current) sendPacket({ type: 'call-hangup', to: peerRef.current })
           cleanupMedia()
         }
       }
@@ -116,9 +125,7 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
   }, [])
 
   const hangup = useCallback(() => {
-    if (peerRef.current) {
-      sendPacket({ type: 'call-hangup', to: peerRef.current })
-    }
+    if (peerRef.current) sendPacket({ type: 'call-hangup', to: peerRef.current })
     cleanupMedia()
   }, [cleanupMedia, sendPacket])
 
@@ -130,10 +137,8 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
         const pc = ensurePeerConnection(username)
         stream.getTracks().forEach((track) => pc.addTrack(track, stream))
         setPhase('outgoing')
-        makingOfferRef.current = true
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
-        makingOfferRef.current = false
         sendPacket({
           type: 'call-offer',
           to: username,
@@ -223,14 +228,12 @@ export function useVideoCall({ sendPacket, setCallHandler }: Options) {
               sdpMLineIndex: pkt.signal.sdpMLineIndex ?? undefined,
             })
           } catch {
-            // candidate may arrive before remote description; ignore
+            // ignore early candidates
           }
           return
         }
 
-        if (pkt.type === 'call-hangup') {
-          cleanupMedia()
-        }
+        if (pkt.type === 'call-hangup') cleanupMedia()
       } catch (err) {
         setCallError(err instanceof Error ? err.message : 'Call signaling failed')
         cleanupMedia()

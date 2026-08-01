@@ -8,7 +8,14 @@ import {
   loadOrCreateIdentity,
   type Identity,
 } from '../lib/crypto'
-import { apiURL, isCallPacket, type Packet, type UserInfo, wsURL } from '../lib/protocol'
+import {
+  apiURL,
+  isCallPacket,
+  type Packet,
+  type StoredMessage,
+  type UserInfo,
+  wsURL,
+} from '../lib/protocol'
 import { VoiceSession } from '../lib/voice'
 
 export type ChatMessage = {
@@ -44,6 +51,10 @@ function saveSession(s: AuthSession | null) {
   else localStorage.setItem(SESSION_KEY, JSON.stringify(s))
 }
 
+function formatAt(ts: number) {
+  return new Date(ts * 1000).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
 export function useChat() {
   const [session, setSession] = useState<AuthSession | null>(() => loadSession())
   const [authError, setAuthError] = useState<string | null>(null)
@@ -56,6 +67,7 @@ export function useChat() {
   const [speakerOn, setSpeakerOn] = useState(false)
   const [keyPrint, setKeyPrint] = useState<string | null>(null)
   const [host, setHost] = useState('')
+  const [historyLoading, setHistoryLoading] = useState(false)
 
   const wsRef = useRef<WebSocket | null>(null)
   const identityRef = useRef<Identity | null>(null)
@@ -64,10 +76,16 @@ export function useChat() {
   const voiceRef = useRef(new VoiceSession())
   const hostRef = useRef('')
   const callHandlerRef = useRef<((pkt: Packet) => void) | null>(null)
+  const sessionRef = useRef<AuthSession | null>(session)
+  const loadedHistoryRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     activePeerRef.current = activePeer
   }, [activePeer])
+
+  useEffect(() => {
+    sessionRef.current = session
+  }, [session])
 
   const appendTo = useCallback((peer: string, msg: Omit<ChatMessage, 'id'>) => {
     setThreads((prev) => {
@@ -101,13 +119,25 @@ export function useChat() {
     setStatus('idle')
   }, [])
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    const sess = sessionRef.current
+    if (sess) {
+      try {
+        await fetch(apiURL('/api/logout', hostRef.current), {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${sess.token}` },
+        })
+      } catch {
+        // ignore network errors on logout
+      }
+    }
     disconnectSocket()
     saveSession(null)
     setSession(null)
     setUsers([])
     setActivePeer(null)
     setThreads({})
+    loadedHistoryRef.current.clear()
     setAuthError(null)
   }, [disconnectSocket])
 
@@ -143,6 +173,45 @@ export function useChat() {
     (username: string, password: string, serverHost = '') =>
       authRequest('login', username, password, serverHost),
     [authRequest],
+  )
+
+  const loadHistory = useCallback(
+    async (peer: string, sess: AuthSession, identity: Identity) => {
+      if (loadedHistoryRef.current.has(peer)) return
+      setHistoryLoading(true)
+      try {
+        const res = await fetch(apiURL(`/api/messages?peer=${encodeURIComponent(peer)}`, hostRef.current), {
+          headers: { Authorization: `Bearer ${sess.token}` },
+        })
+        if (!res.ok) return
+        const data = (await res.json()) as { messages?: StoredMessage[] }
+        const rows = data.messages ?? []
+        const decrypted: ChatMessage[] = []
+        for (const row of rows) {
+          try {
+            const text = await decryptTextFrom(identity.privateKey, row.senderPublicKey, row.ciphertext)
+            const self = row.from === sess.username
+            decrypted.push({
+              id: `hist-${row.id}`,
+              from: self ? 'You' : row.from,
+              text,
+              at: formatAt(row.createdAt),
+              self,
+            })
+          } catch {
+            // skip undecryptable rows (key change)
+          }
+        }
+        loadedHistoryRef.current.add(peer)
+        setThreads((prev) => {
+          const live = (prev[peer] ?? []).filter((m) => !m.id.startsWith('hist-'))
+          return { ...prev, [peer]: [...decrypted, ...live] }
+        })
+      } finally {
+        setHistoryLoading(false)
+      }
+    },
+    [],
   )
 
   const connect = useCallback(
@@ -231,10 +300,17 @@ export function useChat() {
     if (status === 'connected' || status === 'connecting') return
     void connect(session, host).catch(() => {
       setAuthError('Session expired or server unreachable. Please log in again.')
-      logout()
+      void logout()
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session])
+
+  useEffect(() => {
+    if (!session || !activePeer || status !== 'connected') return
+    const identity = identityRef.current
+    if (!identity) return
+    void loadHistory(activePeer, session, identity)
+  }, [activePeer, session, status, loadHistory])
 
   const sendText = useCallback(
     async (text: string) => {
@@ -244,13 +320,14 @@ export function useChat() {
       if (!ws || ws.readyState !== WebSocket.OPEN || !me || !peerName) return
 
       const peer = usersRef.current.find((u) => u.username === peerName)
-      if (!peer?.online || !peer.publicKey) {
-        setError(`${peerName} is offline`)
+      if (!peer?.publicKey) {
+        setError(`${peerName} has no public key yet`)
         return
       }
 
       const message = await encryptTextFor(me.privateKey, peer.publicKey, text)
-      const pkt: Packet = { type: 'message', to: peerName, message }
+      const selfCopy = await encryptTextFor(me.privateKey, me.publicKeyB64, text)
+      const pkt: Packet = { type: 'message', to: peerName, message, selfCopy }
       ws.send(JSON.stringify(pkt))
       appendTo(peerName, {
         from: 'You',
@@ -319,6 +396,7 @@ export function useChat() {
     speakerOn,
     host,
     setHost,
+    historyLoading,
     signup,
     login,
     logout,

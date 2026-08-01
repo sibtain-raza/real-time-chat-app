@@ -22,6 +22,7 @@ type Packet struct {
 	To        string          `json:"to,omitempty"`
 	PublicKey string          `json:"publicKey,omitempty"`
 	Message   string          `json:"message,omitempty"`
+	SelfCopy  string          `json:"selfCopy,omitempty"` // ciphertext sealed to sender for history
 	Voice     string          `json:"voice,omitempty"`
 	Users     []UserInfo      `json:"users,omitempty"`
 	Error     string          `json:"error,omitempty"`

@@ -27,10 +27,26 @@ export type Packet = {
   to?: string
   publicKey?: string
   message?: string
+  selfCopy?: string
   voice?: 'on' | 'off'
   users?: UserInfo[]
   error?: string
   signal?: CallSignal
+}
+
+export type StoredMessage = {
+  id: number
+  peer: string
+  from: string
+  ciphertext: string
+  senderPublicKey: string
+  createdAt: number
+}
+
+export type ICEServer = {
+  urls: string | string[]
+  username?: string
+  credential?: string
 }
 
 export function apiURL(path: string, host?: string): string {
