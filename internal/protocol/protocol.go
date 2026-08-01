@@ -1,99 +1,51 @@
 package protocol
 
-import (
-	"bufio"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net"
-	"sync"
-)
+import "encoding/json"
 
-// Handshake is sent by the client immediately after connecting.
+// Handshake authenticates a WebSocket and registers the session public key.
 type Handshake struct {
-	Name string `json:"name"`
-	Key  string `json:"key"`
+	Token     string `json:"token"`
+	PublicKey string `json:"publicKey"`
 }
 
-// Packet is the common envelope for all post-handshake messages.
+// UserInfo is a directory entry for 1:1 chat.
+type UserInfo struct {
+	Username  string `json:"username"`
+	PublicKey string `json:"publicKey"`
+	Online    bool   `json:"online"`
+}
+
+// Packet is the common envelope for post-handshake messages.
 type Packet struct {
-	Type    string `json:"type"`              // "message", "voice", or "setting"
-	Name    string `json:"name,omitempty"`    // set by server when relaying
-	Message string `json:"message,omitempty"` // encrypted payload (text or voice)
-	Voice   string `json:"voice,omitempty"`   // "on" or "off" for setting packets
+	Type      string     `json:"type"` // message | voice | setting | users | error
+	From      string     `json:"from,omitempty"`
+	To        string     `json:"to,omitempty"` // target username for 1:1
+	PublicKey string     `json:"publicKey,omitempty"`
+	Message   string     `json:"message,omitempty"`
+	Voice     string     `json:"voice,omitempty"`
+	Users     []UserInfo `json:"users,omitempty"`
+	Error     string     `json:"error,omitempty"`
 }
 
 const (
 	TypeMessage = "message"
 	TypeVoice   = "voice"
 	TypeSetting = "setting"
+	TypeUsers   = "users"
+	TypeError   = "error"
 )
 
-// Encoder writes newline-delimited JSON frames.
-type Encoder struct {
-	mu sync.Mutex
-	w  *bufio.Writer
+type Transport interface {
+	ReadJSON(v any) error
+	WriteJSON(v any) error
+	Close() error
+	RemoteAddr() string
 }
 
-func NewEncoder(w io.Writer) *Encoder {
-	return &Encoder{w: bufio.NewWriter(w)}
+func Marshal(v any) ([]byte, error) {
+	return json.Marshal(v)
 }
 
-func (e *Encoder) Encode(v any) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	data, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if _, err := e.w.Write(data); err != nil {
-		return err
-	}
-	if err := e.w.WriteByte('\n'); err != nil {
-		return err
-	}
-	return e.w.Flush()
-}
-
-// Decoder reads newline-delimited JSON frames.
-type Decoder struct {
-	r *bufio.Reader
-}
-
-func NewDecoder(r io.Reader) *Decoder {
-	return &Decoder{r: bufio.NewReader(r)}
-}
-
-func (d *Decoder) Decode(v any) error {
-	line, err := d.r.ReadBytes('\n')
-	if err != nil {
-		return err
-	}
-	if len(line) == 0 {
-		return fmt.Errorf("empty frame")
-	}
-	return json.Unmarshal(line, v)
-}
-
-// Conn wraps a TCP connection with NDJSON encode/decode helpers.
-type Conn struct {
-	Net     net.Conn
-	Encoder *Encoder
-	Decoder *Decoder
-}
-
-func NewConn(c net.Conn) *Conn {
-	return &Conn{
-		Net:     c,
-		Encoder: NewEncoder(c),
-		Decoder: NewDecoder(c),
-	}
-}
-
-func (c *Conn) Close() error {
-	return c.Net.Close()
-}
-
-func (c *Conn) RemoteAddr() net.Addr {
-	return c.Net.RemoteAddr()
+func Unmarshal(data []byte, v any) error {
+	return json.Unmarshal(data, v)
 }

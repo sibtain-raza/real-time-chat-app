@@ -7,15 +7,22 @@ import (
 	"securechat/internal/crypto"
 )
 
-func TestEncryptDecryptRoundTrip(t *testing.T) {
-	password := "shared-secret"
-	plain := []byte("hello secure chat")
+func TestECDHEncryptDecryptRoundTrip(t *testing.T) {
+	alice, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	enc, err := crypto.Encrypt(plain, password)
+	plain := []byte("hello secure chat")
+	enc, err := crypto.EncryptFor(alice.Private, bob.PublicKeyB64(), plain)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	dec, err := crypto.Decrypt(enc, password)
+	dec, err := crypto.DecryptFrom(bob.Private, alice.PublicKeyB64(), enc)
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -24,23 +31,30 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWrongKeyFails(t *testing.T) {
-	enc, err := crypto.Encrypt([]byte("secret"), "key-a")
+func TestWrongRecipientCannotDecrypt(t *testing.T) {
+	alice, _ := crypto.GenerateKeyPair()
+	bob, _ := crypto.GenerateKeyPair()
+	carol, _ := crypto.GenerateKeyPair()
+
+	enc, err := crypto.EncryptFor(alice.Private, bob.PublicKeyB64(), []byte("secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := crypto.Decrypt(enc, "key-b"); err == nil {
-		t.Fatal("expected decrypt failure with wrong key")
+	if _, err := crypto.DecryptFrom(carol.Private, alice.PublicKeyB64(), enc); err == nil {
+		t.Fatal("expected decrypt failure for wrong recipient")
 	}
 }
 
-func TestDeriveKeyLength(t *testing.T) {
-	k := crypto.DeriveKey("short")
-	if len(k) != 32 {
-		t.Fatalf("key length %d, want 32", len(k))
+func TestPublicKeyRoundTrip(t *testing.T) {
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
 	}
-	k2 := crypto.DeriveKey(string(bytes.Repeat([]byte("x"), 64)))
-	if len(k2) != 32 {
-		t.Fatalf("key length %d, want 32", len(k2))
+	parsed, err := crypto.ParsePublicKey(kp.PublicKeyB64())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(parsed.Bytes(), kp.Public.Bytes()) {
+		t.Fatal("public key mismatch")
 	}
 }

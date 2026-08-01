@@ -2,35 +2,43 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
-	"securechat/internal/crypto"
+	"securechat/internal/auth"
 	"securechat/internal/protocol"
+
+	"github.com/gorilla/websocket"
 )
 
-// Client holds per-connection state.
 type Client struct {
-	conn *protocol.Conn
-	name string
-	key  string
+	transport protocol.Transport
+	username  string
+	publicKey string
 }
 
-// Server is a multi-client encrypted chat relay.
 type Server struct {
 	addr      string
+	webDir    string
+	store     *auth.Store
 	mu        sync.RWMutex
-	clients   map[*Client]struct{}
-	streaming map[*Client]struct{}
+	clients   map[string]*Client // username -> client (one active session)
+	streaming map[string]bool
 	logger    *log.Logger
 	debug     bool
+	upgrader  websocket.Upgrader
 }
 
-func New(addr string, debug bool) *Server {
+func New(addr, webDir string, store *auth.Store, debug bool) *Server {
 	f, err := os.OpenFile("all.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	var logger *log.Logger
 	if err != nil {
@@ -40,10 +48,15 @@ func New(addr string, debug bool) *Server {
 	}
 	return &Server{
 		addr:      addr,
-		clients:   make(map[*Client]struct{}),
-		streaming: make(map[*Client]struct{}),
+		webDir:    webDir,
+		store:     store,
+		clients:   make(map[string]*Client),
+		streaming: make(map[string]bool),
 		logger:    logger,
 		debug:     debug,
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
 	}
 }
 
@@ -55,10 +68,43 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-func (s *Server) ClientCount() int {
+func (s *Server) OnlineCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.clients)
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("/api/signup", s.handleSignup)
+	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/users", s.handleUsers)
+
+	if s.webDir != "" {
+		webDir := s.webDir
+		if abs, err := filepath.Abs(webDir); err == nil {
+			webDir = abs
+		}
+		fs := http.FileServer(http.Dir(webDir))
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			path := filepath.Join(webDir, filepath.Clean(r.URL.Path))
+			if info, err := os.Stat(path); err == nil && !info.IsDir() {
+				fs.ServeHTTP(w, r)
+				return
+			}
+			http.ServeFile(w, r, filepath.Join(webDir, "index.html"))
+		})
+	} else {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("ChatApp API is running. Build the React UI into web/dist."))
+		})
+	}
+	return mux
 }
 
 func (s *Server) ListenAndServe() error {
@@ -66,56 +112,191 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	s.logf("Server start on %s", s.addr)
-	for {
-		raw, err := ln.Accept()
-		if err != nil {
-			s.logf("accept error: %v", err)
-			continue
+	s.logf("Server start on http://%s (ws://%s/ws)", ln.Addr().String(), ln.Addr().String())
+	return http.Serve(ln, s.Handler())
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readJSON(r *http.Request, v any) error {
+	defer r.Body.Close()
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	return dec.Decode(v)
+}
+
+func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := s.store.SignUp(body.Username, body.Password); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, auth.ErrUserExists) {
+			status = http.StatusConflict
 		}
-		go s.handleConn(raw)
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	token, err := s.store.Login(body.Username, body.Password)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "account created but login failed"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"token":    token,
+		"username": strings.TrimSpace(body.Username),
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST required"})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	token, err := s.store.Login(body.Username, body.Password)
+	if err != nil {
+		status := http.StatusUnauthorized
+		if errors.Is(err, auth.ErrBadUsername) || errors.Is(err, auth.ErrBadPassword) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"token":    token,
+		"username": strings.TrimSpace(body.Username),
+	})
+}
+
+func (s *Server) bearerUser(r *http.Request) (string, error) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return "", auth.ErrBadToken
+	}
+	return s.store.UsernameForToken(strings.TrimPrefix(h, "Bearer "))
+}
+
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET required"})
+		return
+	}
+	if _, err := s.bearerUser(r); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": s.directory()})
+}
+
+func (s *Server) directory() []protocol.UserInfo {
+	users, err := s.store.ListUsers()
+	if err != nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]protocol.UserInfo, 0, len(users))
+	for _, u := range users {
+		pub := u.PublicKey
+		online := false
+		if c, ok := s.clients[u.Username]; ok {
+			online = true
+			pub = c.publicKey
+		}
+		out = append(out, protocol.UserInfo{
+			Username:  u.Username,
+			PublicKey: pub,
+			Online:    online,
+		})
+	}
+	return out
+}
+
+func (s *Server) broadcastUsers() {
+	pkt := protocol.Packet{Type: protocol.TypeUsers, Users: s.directory()}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, c := range s.clients {
+		_ = c.transport.WriteJSON(pkt)
 	}
 }
 
-func (s *Server) handleConn(raw net.Conn) {
-	c := protocol.NewConn(raw)
-	var hs protocol.Handshake
-	if err := c.Decoder.Decode(&hs); err != nil {
-		_ = c.Close()
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logf("websocket upgrade failed: %v", err)
 		return
 	}
-	if hs.Name == "" || hs.Key == "" {
-		_ = c.Close()
-		return
-	}
+	t := &wsTransport{conn: conn, remote: r.RemoteAddr}
+	s.serveClient(t)
+}
 
-	client := &Client{conn: c, name: hs.Name, key: hs.Key}
+func (s *Server) serveClient(t protocol.Transport) {
+	var hs protocol.Handshake
+	if err := t.ReadJSON(&hs); err != nil {
+		_ = t.Close()
+		return
+	}
+	username, err := s.store.UsernameForToken(hs.Token)
+	if err != nil || hs.PublicKey == "" {
+		_ = t.WriteJSON(protocol.Packet{Type: protocol.TypeError, Error: "unauthorized"})
+		_ = t.Close()
+		return
+	}
+	_ = s.store.SetPublicKey(username, hs.PublicKey)
+
+	client := &Client{transport: t, username: username, publicKey: hs.PublicKey}
+
 	s.mu.Lock()
-	s.clients[client] = struct{}{}
+	if old, ok := s.clients[username]; ok {
+		_ = old.transport.Close()
+		delete(s.streaming, username)
+	}
+	s.clients[username] = client
 	s.mu.Unlock()
 
-	s.logf("Connected %s as %q", c.RemoteAddr(), hs.Name)
+	s.logf("Connected %s as %q", t.RemoteAddr(), username)
+	s.broadcastUsers()
 
 	defer func() {
-		s.removeClient(client)
-		_ = c.Close()
-		s.logf("Disconnected %s (%s)", c.RemoteAddr(), hs.Name)
+		s.mu.Lock()
+		if cur, ok := s.clients[username]; ok && cur == client {
+			delete(s.clients, username)
+			delete(s.streaming, username)
+		}
+		s.mu.Unlock()
+		_ = t.Close()
+		s.logf("Disconnected %s (%s)", t.RemoteAddr(), username)
+		s.broadcastUsers()
 	}()
 
 	for {
 		var pkt protocol.Packet
-		if err := c.Decoder.Decode(&pkt); err != nil {
+		if err := t.ReadJSON(&pkt); err != nil {
 			return
 		}
 		s.handlePacket(client, pkt)
 	}
-}
-
-func (s *Server) removeClient(client *Client) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.clients, client)
-	delete(s.streaming, client)
 }
 
 func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
@@ -123,74 +304,40 @@ func (s *Server) handlePacket(sender *Client, pkt protocol.Packet) {
 	case protocol.TypeSetting:
 		s.mu.Lock()
 		if pkt.Voice == "on" {
-			s.streaming[sender] = struct{}{}
+			s.streaming[sender.username] = true
 		} else {
-			delete(s.streaming, sender)
+			delete(s.streaming, sender.username)
 		}
 		s.mu.Unlock()
 
-	case protocol.TypeMessage:
-		plain, err := crypto.Decrypt(pkt.Message, sender.key)
-		if err != nil {
-			s.logf("decrypt text from %s failed: %v", sender.name, err)
+	case protocol.TypeMessage, protocol.TypeVoice:
+		if pkt.To == "" || pkt.Message == "" {
 			return
 		}
-		s.relayText(sender, plain)
-
-	case protocol.TypeVoice:
-		plain, err := crypto.Decrypt(pkt.Message, sender.key)
-		if err != nil {
-			s.logf("decrypt voice from %s failed: %v", sender.name, err)
+		s.mu.RLock()
+		target, ok := s.clients[pkt.To]
+		streaming := s.streaming[pkt.To]
+		s.mu.RUnlock()
+		if !ok {
+			_ = sender.transport.WriteJSON(protocol.Packet{
+				Type:  protocol.TypeError,
+				Error: pkt.To + " is offline",
+			})
 			return
 		}
-		s.relayVoice(sender, plain)
+		if pkt.Type == protocol.TypeVoice && !streaming {
+			return
+		}
+		out := protocol.Packet{
+			Type:      pkt.Type,
+			From:      sender.username,
+			To:        pkt.To,
+			PublicKey: sender.publicKey,
+			Message:   pkt.Message,
+		}
+		_ = target.transport.WriteJSON(out)
 
 	default:
-		s.logf("unknown packet type %q from %s", pkt.Type, sender.name)
+		s.logf("unknown packet type %q from %s", pkt.Type, sender.username)
 	}
-}
-
-func (s *Server) relayText(sender *Client, plain []byte) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for c := range s.clients {
-		if c == sender {
-			continue
-		}
-		enc, err := crypto.Encrypt(plain, c.key)
-		if err != nil {
-			continue
-		}
-		out := protocol.Packet{
-			Type:    protocol.TypeMessage,
-			Name:    sender.name,
-			Message: enc,
-		}
-		_ = c.conn.Encoder.Encode(out)
-	}
-}
-
-func (s *Server) relayVoice(sender *Client, plain []byte) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for c := range s.streaming {
-		if c == sender {
-			continue
-		}
-		enc, err := crypto.Encrypt(plain, c.key)
-		if err != nil {
-			continue
-		}
-		out := protocol.Packet{
-			Type:    protocol.TypeVoice,
-			Name:    sender.name,
-			Message: enc,
-		}
-		_ = c.conn.Encoder.Encode(out)
-	}
-}
-
-// MarshalHandshake is a tiny helper used by tests / debugging.
-func MarshalHandshake(hs protocol.Handshake) ([]byte, error) {
-	return json.Marshal(hs)
 }
