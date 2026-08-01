@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { VideoCall } from './components/VideoCall'
-import { WavePlane } from './components/WavePlane'
 import { useChat } from './hooks/useChat'
 import { useVideoCall } from './hooks/useVideoCall'
+import { avatarColor, initials } from './lib/avatar'
 import { fingerprint } from './lib/crypto'
 import { clearTrust, markVerified, trustStatus } from './lib/safety'
 
@@ -32,6 +32,50 @@ function VideoIcon() {
       <rect x="3" y="7" width="11" height="10" rx="1.5" />
       <path d="M14 10.5 20 7v10l-6-3.5" />
     </svg>
+  )
+}
+
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor">
+      <path d="M3.4 20.6 21 12 3.4 3.4l.1 6.8L15 12 3.5 13.8z" />
+    </svg>
+  )
+}
+
+function BackIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M15 18 9 12l6-6" />
+    </svg>
+  )
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16.5 16.5 4 4" />
+    </svg>
+  )
+}
+
+function LogoutIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <path d="M10 7V5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-2" />
+      <path d="M15 12H3" />
+      <path d="m6 9-3 3 3 3" />
+    </svg>
+  )
+}
+
+function Avatar({ name, online, size = 'md' }: { name: string; online?: boolean; size?: 'sm' | 'md' | 'lg' }) {
+  return (
+    <span className={`avatar avatar-${size}`} style={{ background: avatarColor(name) }} aria-hidden>
+      {initials(name)}
+      {online ? <span className="avatar-online" /> : null}
+    </span>
   )
 }
 
@@ -70,6 +114,7 @@ export default function App() {
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState('')
+  const [query, setQuery] = useState('')
   const [trustTick, setTrustTick] = useState(0)
   const endRef = useRef<HTMLDivElement>(null)
 
@@ -78,6 +123,12 @@ export default function App() {
   }, [messages, activePeer])
 
   const activeUser = users.find((u) => u.username === activePeer)
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return users
+    return users.filter((u) => u.username.toLowerCase().includes(q))
+  }, [users, query])
+
   const peerTrust = useMemo(() => {
     if (!session || !activePeer || !activeUser?.publicKey) return null
     void trustTick
@@ -112,15 +163,18 @@ export default function App() {
 
   const connected = Boolean(session) && status === 'connected'
   const canMessage = Boolean(activeUser?.publicKey)
+  const chatOpen = Boolean(activePeer)
 
   if (!session) {
     return (
-      <div className="app-shell">
-        <WavePlane />
+      <div className="app-shell gate-shell">
         <main className="gate">
           <div className="gate-inner">
+            <div className="gate-logo" aria-hidden>
+              <span className="gate-logo-mark">C</span>
+            </div>
             <h1 className="brand">ChatApp</h1>
-            <p className="tagline">Create an account, then talk one-to-one with private keys.</p>
+            <p className="tagline">Private 1:1 chat with your own keys — Telegram-simple.</p>
 
             <div className="mode-switch" role="tablist" aria-label="Auth mode">
               <button
@@ -176,18 +230,11 @@ export default function App() {
                     placeholder="Leave blank (uses this site)"
                     autoComplete="off"
                   />
-                  <p className="field-hint">
-                    Only set this for a remote Go server. Leave blank on the public demo URL.
-                  </p>
                 </div>
               </details>
-              <p className="key-note">
-                After you {mode === 'signup' ? 'sign up' : 'log in'}, we create or restore your ECDH
-                key pair. Prefer HTTPS in production for camera/mic and transport security.
-              </p>
               <div className="cta-row">
                 <button className="btn btn-primary" type="submit" disabled={busy}>
-                  {busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : 'Log in'}
+                  {busy ? 'Please wait…' : mode === 'signup' ? 'Start messaging' : 'Log in'}
                 </button>
               </div>
               {authError ? <p className="gate-error">{authError}</p> : null}
@@ -200,14 +247,13 @@ export default function App() {
 
   if (!connected) {
     return (
-      <div className="app-shell">
-        <WavePlane />
+      <div className="app-shell gate-shell">
         <main className="gate">
           <div className="gate-inner">
             <h1 className="brand">ChatApp</h1>
             <p className="tagline">
               {status === 'connecting'
-                ? 'Connecting secure session…'
+                ? 'Connecting…'
                 : status === 'error'
                   ? 'Could not connect to the chat server.'
                   : 'Reconnecting…'}
@@ -224,7 +270,6 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <WavePlane />
       <VideoCall
         phase={call.phase}
         peer={call.peer}
@@ -239,21 +284,38 @@ export default function App() {
         attachLocalVideo={call.attachLocalVideo}
         attachRemoteVideo={call.attachRemoteVideo}
       />
-      <main className="desk">
+      <main className={`desk${chatOpen ? ' chat-open' : ''}`}>
         <aside className="sidebar">
-          <div className="sidebar-head">
-            <h1 className="room-brand">ChatApp</h1>
-            <p className="key-print">
-              {session.username}
-              {keyPrint ? ` · ${keyPrint}` : ''}
-            </p>
+          <header className="sidebar-head">
+            <div className="sidebar-me">
+              <Avatar name={session.username} online size="md" />
+              <div className="sidebar-me-text">
+                <h1 className="room-brand">ChatApp</h1>
+                <p className="me-name">{session.username}</p>
+              </div>
+            </div>
+            <button className="icon-btn" type="button" onClick={() => void logout()} title="Log out" aria-label="Log out">
+              <LogoutIcon />
+            </button>
+          </header>
+
+          <div className="search-bar">
+            <SearchIcon />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+              aria-label="Search people"
+            />
           </div>
-          <p className="sidebar-label">People</p>
+
           <ul className="user-list">
-            {users.length === 0 ? (
-              <li className="user-empty">No other accounts yet. Invite someone to sign up.</li>
+            {filtered.length === 0 ? (
+              <li className="user-empty">
+                {users.length === 0 ? 'No chats yet — invite someone to sign up.' : 'No matches.'}
+              </li>
             ) : (
-              users.map((u) => (
+              filtered.map((u) => (
                 <li key={u.username}>
                   <button
                     type="button"
@@ -263,69 +325,45 @@ export default function App() {
                       setError(null)
                     }}
                   >
-                    <span className={`presence${u.online ? ' on' : ''}`} />
-                    <span className="user-name">{u.username}</span>
-                    <span className="user-state">{u.online ? 'online' : 'offline'}</span>
+                    <Avatar name={u.username} online={u.online} />
+                    <span className="user-meta">
+                      <span className="user-name">{u.username}</span>
+                      <span className="user-state">{u.online ? 'online' : 'offline'}</span>
+                    </span>
                   </button>
                 </li>
               ))
             )}
           </ul>
-          <button className="btn btn-ghost logout" type="button" onClick={() => void logout()}>
-            Log out
-          </button>
+          {keyPrint ? <p className="sidebar-key">Your key · {keyPrint}</p> : null}
         </aside>
 
         <section className="conversation">
           {activePeer ? (
             <>
               <header className="conv-top">
-                <div>
+                <button
+                  type="button"
+                  className="icon-btn back-btn"
+                  aria-label="Back to chats"
+                  onClick={() => setActivePeer(null)}
+                >
+                  <BackIcon />
+                </button>
+                <Avatar name={activePeer} online={activeUser?.online} size="md" />
+                <div className="conv-identity">
                   <h2 className="conv-title">{activePeer}</h2>
                   <p className="peer-line">
-                    {activeUser?.online ? 'Online' : 'Offline'} · end-to-end encrypted
-                    {historyLoading ? ' · loading history…' : ''}
+                    {activeUser?.online ? 'online' : 'offline'}
+                    {historyLoading ? ' · loading…' : ''}
+                    {peerTrust?.status === 'verified' ? ' · verified' : ''}
+                    {peerTrust?.status === 'changed' ? ' · key changed' : ''}
                   </p>
-                  {peerTrust ? (
-                    <div className={`trust-row ${peerTrust.status}`}>
-                      <span>
-                        Safety number · <code>{peerTrust.print}</code>
-                        {peerTrust.status === 'verified'
-                          ? ' · verified'
-                          : peerTrust.status === 'changed'
-                            ? ' · key changed!'
-                            : ' · unverified'}
-                      </span>
-                      {peerTrust.status !== 'verified' && activeUser?.publicKey ? (
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => {
-                            markVerified(session.username, activePeer, activeUser.publicKey)
-                            setTrustTick((n) => n + 1)
-                          }}
-                        >
-                          Mark verified
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          onClick={() => {
-                            clearTrust(session.username, activePeer)
-                            setTrustTick((n) => n + 1)
-                          }}
-                        >
-                          Clear
-                        </button>
-                      )}
-                    </div>
-                  ) : null}
                 </div>
                 <div className="media-toggles">
                   <button
                     type="button"
-                    className="toggle"
+                    className="icon-btn"
                     aria-label="Start video call"
                     title="Video call"
                     disabled={!activeUser?.online || call.phase !== 'idle'}
@@ -335,7 +373,7 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    className={`toggle${micOn ? ' on' : ''}`}
+                    className={`icon-btn${micOn ? ' on' : ''}`}
                     aria-pressed={micOn}
                     aria-label="Microphone"
                     onClick={() => void toggleMic()}
@@ -345,7 +383,7 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    className={`toggle${speakerOn ? ' on' : ''}`}
+                    className={`icon-btn${speakerOn ? ' on' : ''}`}
                     aria-pressed={speakerOn}
                     aria-label="Speaker"
                     onClick={() => void toggleSpeaker()}
@@ -355,21 +393,56 @@ export default function App() {
                 </div>
               </header>
 
-              <div className="transcript" aria-live="polite">
-                {messages.map((m) => (
-                  <article
-                    key={m.id}
-                    className={`msg${m.self ? ' self' : ''}${m.system ? ' system' : ''}`}
+              {peerTrust && peerTrust.status !== 'verified' ? (
+                <div className={`trust-banner ${peerTrust.status}`}>
+                  <span>
+                    Safety number <code>{peerTrust.print}</code>
+                    {peerTrust.status === 'changed' ? ' — key changed' : ' — unverified'}
+                  </span>
+                  {activeUser?.publicKey ? (
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        markVerified(session.username, activePeer, activeUser.publicKey)
+                        setTrustTick((n) => n + 1)
+                      }}
+                    >
+                      Mark verified
+                    </button>
+                  ) : null}
+                </div>
+              ) : peerTrust?.status === 'verified' ? (
+                <div className="trust-banner verified">
+                  <span>
+                    Verified · <code>{peerTrust.print}</code>
+                  </span>
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => {
+                      clearTrust(session.username, activePeer)
+                      setTrustTick((n) => n + 1)
+                    }}
                   >
-                    {!m.system ? (
-                      <div className="msg-head">
-                        <span className="msg-name">{m.from}</span>
-                        <time>{m.at}</time>
-                      </div>
-                    ) : null}
-                    <div className="msg-body">{m.text}</div>
-                  </article>
-                ))}
+                    Clear
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="transcript" aria-live="polite">
+                {messages.map((m) =>
+                  m.system ? (
+                    <div key={m.id} className="msg system">
+                      <span>{m.text}</span>
+                    </div>
+                  ) : (
+                    <article key={m.id} className={`bubble${m.self ? ' self' : ''}`}>
+                      <div className="bubble-body">{m.text}</div>
+                      <time className="bubble-time">{m.at}</time>
+                    </article>
+                  ),
+                )}
                 <div ref={endRef} />
               </div>
 
@@ -380,23 +453,27 @@ export default function App() {
                 <input
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
-                  placeholder={
-                    canMessage
-                      ? `Message ${activePeer}`
-                      : 'Waiting for their public key'
-                  }
+                  placeholder={canMessage ? 'Message' : 'Waiting for their key…'}
                   aria-label="Message"
                   disabled={!canMessage}
                 />
-                <button className="btn btn-primary" type="submit" disabled={!canMessage}>
-                  Send
+                <button
+                  className="send-btn"
+                  type="submit"
+                  disabled={!canMessage || !draft.trim()}
+                  aria-label="Send"
+                >
+                  <SendIcon />
                 </button>
               </form>
             </>
           ) : (
             <div className="empty-conv">
-              <h2>Pick someone to chat</h2>
-              <p>1:1 messages and video calls are encrypted peer-to-peer.</p>
+              <div className="empty-illu" aria-hidden>
+                <span className="gate-logo-mark">C</span>
+              </div>
+              <h2>ChatApp</h2>
+              <p>Select a chat to start messaging.</p>
             </div>
           )}
         </section>
