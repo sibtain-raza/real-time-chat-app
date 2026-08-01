@@ -8,7 +8,7 @@ import {
   loadOrCreateIdentity,
   type Identity,
 } from '../lib/crypto'
-import { apiURL, type Packet, type UserInfo, wsURL } from '../lib/protocol'
+import { apiURL, isCallPacket, type Packet, type UserInfo, wsURL } from '../lib/protocol'
 import { VoiceSession } from '../lib/voice'
 
 export type ChatMessage = {
@@ -63,6 +63,7 @@ export function useChat() {
   const activePeerRef = useRef<string | null>(null)
   const voiceRef = useRef(new VoiceSession())
   const hostRef = useRef('')
+  const callHandlerRef = useRef<((pkt: Packet) => void) | null>(null)
 
   useEffect(() => {
     activePeerRef.current = activePeer
@@ -76,6 +77,16 @@ export function useChat() {
         [peer]: [...list, { ...msg, id: `${Date.now()}-${Math.random()}` }],
       }
     })
+  }, [])
+
+  const setCallHandler = useCallback((handler: ((pkt: Packet) => void) | null) => {
+    callHandlerRef.current = handler
+  }, [])
+
+  const sendPacket = useCallback((pkt: Packet) => {
+    const ws = wsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify(pkt))
   }, [])
 
   const disconnectSocket = useCallback(() => {
@@ -174,6 +185,11 @@ export function useChat() {
             const me = identityRef.current
             if (!me) return
 
+            if (isCallPacket(pkt.type)) {
+              callHandlerRef.current?.(pkt)
+              return
+            }
+
             if (pkt.type === 'users' && pkt.users) {
               const others = pkt.users.filter((u) => u.username !== sess.username)
               usersRef.current = others
@@ -210,7 +226,6 @@ export function useChat() {
     [appendTo],
   )
 
-  // Auto-connect after login/signup when session exists
   useEffect(() => {
     if (!session) return
     if (status === 'connected' || status === 'connecting') return
@@ -247,11 +262,12 @@ export function useChat() {
     [appendTo],
   )
 
-  const sendSetting = useCallback((voice: 'on' | 'off') => {
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({ type: 'setting', voice } satisfies Packet))
-  }, [])
+  const sendSetting = useCallback(
+    (voice: 'on' | 'off') => {
+      sendPacket({ type: 'setting', voice })
+    },
+    [sendPacket],
+  )
 
   const toggleSpeaker = useCallback(async () => {
     if (speakerOn) {
@@ -272,21 +288,20 @@ export function useChat() {
       return
     }
     await voiceRef.current.startMic(async (pcm) => {
-      const ws = wsRef.current
       const me = identityRef.current
       const peerName = activePeerRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN || !me || !peerName) return
+      if (!me || !peerName) return
       const peer = usersRef.current.find((u) => u.username === peerName)
       if (!peer?.online || !peer.publicKey) return
       const message = await encryptFor(me.privateKey, peer.publicKey, pcm)
-      ws.send(JSON.stringify({ type: 'voice', to: peerName, message } satisfies Packet))
+      sendPacket({ type: 'voice', to: peerName, message })
     })
     setMicOn(true)
-  }, [micOn])
+  }, [micOn, sendPacket])
 
   useEffect(() => () => disconnectSocket(), [disconnectSocket])
 
-  const messages = activePeer ? threads[activePeer] ?? [] : []
+  const messages = activePeer ? (threads[activePeer] ?? []) : []
 
   return {
     session,
@@ -310,5 +325,7 @@ export function useChat() {
     sendText,
     toggleMic,
     toggleSpeaker,
+    sendPacket,
+    setCallHandler,
   }
 }

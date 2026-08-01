@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { VideoCall } from './components/VideoCall'
 import { WavePlane } from './components/WavePlane'
 import { useChat } from './hooks/useChat'
+import { useVideoCall } from './hooks/useVideoCall'
 
 function MicIcon() {
   return (
@@ -18,6 +20,15 @@ function SpeakerIcon() {
       <path d="M4 10v4h3l5 4V6l-5 4H4Z" />
       <path d="M16 9.5a4 4 0 0 1 0 5" />
       <path d="M18.5 7a7 7 0 0 1 0 10" />
+    </svg>
+  )
+}
+
+function VideoIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+      <rect x="3" y="7" width="11" height="10" rx="1.5" />
+      <path d="M14 10.5 20 7v10l-6-3.5" />
     </svg>
   )
 }
@@ -45,7 +56,11 @@ export default function App() {
     sendText,
     toggleMic,
     toggleSpeaker,
+    sendPacket,
+    setCallHandler,
   } = useChat()
+
+  const call = useVideoCall({ sendPacket, setCallHandler })
 
   const [mode, setMode] = useState<'login' | 'signup'>('signup')
   const [username, setUsername] = useState('')
@@ -148,7 +163,7 @@ export default function App() {
               </div>
               <p className="key-note">
                 After you {mode === 'signup' ? 'sign up' : 'log in'}, we create or restore your ECDH
-                key pair in this browser and open private 1:1 chats.
+                key pair in this browser and open private 1:1 chats and video calls.
               </p>
               <div className="cta-row">
                 <button className="btn btn-primary" type="submit" disabled={busy}>
@@ -186,6 +201,20 @@ export default function App() {
   return (
     <div className="app-shell">
       <WavePlane />
+      <VideoCall
+        phase={call.phase}
+        peer={call.peer}
+        muted={call.muted}
+        cameraOff={call.cameraOff}
+        callError={call.callError}
+        onAccept={() => void call.acceptCall()}
+        onReject={call.rejectCall}
+        onHangup={call.hangup}
+        onToggleMute={call.toggleMute}
+        onToggleCamera={call.toggleCamera}
+        attachLocalVideo={call.attachLocalVideo}
+        attachRemoteVideo={call.attachRemoteVideo}
+      />
       <main className="desk">
         <aside className="sidebar">
           <div className="sidebar-head">
@@ -230,10 +259,22 @@ export default function App() {
                 <div>
                   <h2 className="conv-title">{activePeer}</h2>
                   <p className="peer-line">
-                    {activeUser?.online ? 'Online · end-to-end encrypted' : 'Offline · messaging disabled'}
+                    {activeUser?.online
+                      ? 'Online · end-to-end encrypted'
+                      : 'Offline · messaging disabled'}
                   </p>
                 </div>
                 <div className="media-toggles">
+                  <button
+                    type="button"
+                    className="toggle"
+                    aria-label="Start video call"
+                    title="Video call"
+                    disabled={!activeUser?.online || call.phase !== 'idle'}
+                    onClick={() => void call.startCall(activePeer)}
+                  >
+                    <VideoIcon />
+                  </button>
                   <button
                     type="button"
                     className={`toggle${micOn ? ' on' : ''}`}
@@ -275,6 +316,7 @@ export default function App() {
               </div>
 
               {error ? <p className="inline-error">{error}</p> : null}
+              {call.callError ? <p className="inline-error">{call.callError}</p> : null}
 
               <form className="composer" onSubmit={onSend}>
                 <input
@@ -292,7 +334,7 @@ export default function App() {
           ) : (
             <div className="empty-conv">
               <h2>Pick someone to chat</h2>
-              <p>1:1 messages are encrypted with each person’s public key.</p>
+              <p>1:1 messages and video calls are encrypted peer-to-peer.</p>
             </div>
           )}
         </section>

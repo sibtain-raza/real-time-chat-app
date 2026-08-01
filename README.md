@@ -9,6 +9,7 @@ Go WebSocket server + React UI with **signup/login** and **1:1 end-to-end encryp
 * **Automatic ECDH key pairs** — created/restored in the browser per account (no shared room password)
 * **End-to-end encryption** — AES-GCM sealed with ECDH; server routes ciphertext only
 * **Voice** — mic/speaker toggles for the active conversation
+* **1:1 video calls** — WebRTC (camera/mic) with signaling over the existing WebSocket
 * **Online presence** — see who is connected
 
 ## Quick start
@@ -22,6 +23,7 @@ go run ./cmd/server
 1. **Sign up** as `ada`
 2. Open another browser/profile and **sign up** as `bob`
 3. Select each other in **People** and chat
+4. Click the **video** button in a conversation header to start a 1:1 call (allow camera/mic)
 
 ## API
 
