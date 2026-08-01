@@ -242,6 +242,29 @@ button {
   max-width: 42ch;
 }
 
+.advanced-host {
+  margin: 0.35rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.advanced-host summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.advanced-host .field {
+  margin-top: 0.65rem;
+}
+
+.field-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.35;
+  color: var(--ink-soft);
+  max-width: 42ch;
+}
+
 .key-print {
   margin: 0.15rem 0 0;
   font-size: 0.82rem;

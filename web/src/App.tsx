@@ -141,16 +141,6 @@ export default function App() {
 
             <form className="gate-form" onSubmit={onAuth}>
               <div className="field">
-                <label htmlFor="host">Server</label>
-                <input
-                  id="host"
-                  value={host}
-                  onChange={(e) => setHost(e.target.value)}
-                  placeholder="localhost:9090 (blank if same host)"
-                  autoComplete="off"
-                />
-              </div>
-              <div className="field">
                 <label htmlFor="username">Username</label>
                 <input
                   id="username"
@@ -175,6 +165,22 @@ export default function App() {
                   autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
                 />
               </div>
+              <details className="advanced-host">
+                <summary>Advanced: custom server</summary>
+                <div className="field">
+                  <label htmlFor="host">Server</label>
+                  <input
+                    id="host"
+                    value={host}
+                    onChange={(e) => setHost(e.target.value)}
+                    placeholder="Leave blank (uses this site)"
+                    autoComplete="off"
+                  />
+                  <p className="field-hint">
+                    Only set this for a remote Go server. Leave blank on the public demo URL.
+                  </p>
+                </div>
+              </details>
               <p className="key-note">
                 After you {mode === 'signup' ? 'sign up' : 'log in'}, we create or restore your ECDH
                 key pair. Prefer HTTPS in production for camera/mic and transport security.
@@ -200,7 +206,11 @@ export default function App() {
           <div className="gate-inner">
             <h1 className="brand">ChatApp</h1>
             <p className="tagline">
-              {status === 'connecting' ? 'Connecting secure session…' : 'Reconnecting…'}
+              {status === 'connecting'
+                ? 'Connecting secure session…'
+                : status === 'error'
+                  ? 'Could not connect to the chat server.'
+                  : 'Reconnecting…'}
             </p>
             {error ? <p className="gate-error">{error}</p> : null}
             <button className="btn btn-ghost" type="button" onClick={() => void logout()}>

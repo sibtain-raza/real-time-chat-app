@@ -11,6 +11,8 @@ import {
 import {
   apiURL,
   isCallPacket,
+  networkErrorMessage,
+  resolveHost,
   type Packet,
   type StoredMessage,
   type UserInfo,
@@ -144,14 +146,25 @@ export function useChat() {
   const authRequest = useCallback(
     async (mode: 'signup' | 'login', username: string, password: string, serverHost: string) => {
       setAuthError(null)
-      setHost(serverHost)
-      hostRef.current = serverHost
-      const res = await fetch(apiURL(`/api/${mode}`, serverHost), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      })
-      const data = (await res.json()) as { token?: string; username?: string; error?: string }
+      const resolved = resolveHost(serverHost)
+      setHost(resolved)
+      hostRef.current = resolved
+      let res: Response
+      try {
+        res = await fetch(apiURL(`/api/${mode}`, resolved), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        })
+      } catch (err) {
+        throw new Error(networkErrorMessage(err, mode))
+      }
+      let data: { token?: string; username?: string; error?: string }
+      try {
+        data = (await res.json()) as { token?: string; username?: string; error?: string }
+      } catch {
+        throw new Error(`${mode} failed: invalid server response`)
+      }
       if (!res.ok || !data.token || !data.username) {
         throw new Error(data.error || `${mode} failed`)
       }
@@ -236,7 +249,9 @@ export function useChat() {
 
         ws.onerror = () => {
           setStatus('error')
-          setError('Could not reach the chat server.')
+          setError(
+            'Could not reach the chat server. Leave Server blank when using this site’s URL, then log in again.',
+          )
           reject(new Error('websocket error'))
         }
 
